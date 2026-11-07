@@ -156,7 +156,7 @@ def cmd_doctor(args) -> int:
         print(f"session: {os.environ.get('XDG_SESSION_TYPE')} / {os.environ.get('XDG_CURRENT_DESKTOP')}")
         llm = Ollama(cfg["model"])
         try:
-            print(f"{ok(True)} model: {await llm.resolve_model()}")
+            print(f"{ok(True)} model: {await llm.resolve_model()} on {llm.host}")
             installed = await llm.installed_models()
             for name in RECOMMENDED_MODELS:
                 have = find_installed(name, installed)
@@ -224,6 +224,43 @@ def cmd_eval(args) -> int:
     return 0 if any(m["status"] == "ok" for m in res["models"]) else 1
 
 
+def cmd_ollama(args) -> int:
+    from fane.config import set_value
+    from fane.discovery import NotOllama, discover, normalize_host, probe
+    from fane.llm import choose_model
+
+    mcfg = Config.load()["model"]
+    if args.action == "scan":
+        print("Looking for Ollama on this computer and your network…")
+        servers = asyncio.run(discover(extra=[mcfg["host"]]))
+        for srv in servers:
+            mark = "●" if srv.matches(mcfg["host"]) else "○"
+            model = choose_model(mcfg, srv.models)
+            name = "" if srv.label == srv.address else f"  ({srv.label})"
+            print(f"{mark} {srv.url}{name}  Ollama {srv.version}, {len(srv.models)} models, "
+                  + (f"would use {model}" if model else "none of Fane's models"))
+        if not servers:
+            print("None found. If yours is on another network or port: fane ollama use HOST:PORT")
+        print(f"\nFane uses: {mcfg['host']}. Change with `fane ollama use ADDRESS` or in Settings.")
+        return 0
+    # use
+    try:
+        url = normalize_host(args.address)
+        srv = asyncio.run(probe(url))
+    except NotOllama as e:
+        print(e, file=sys.stderr)
+        return 1
+    model = choose_model(mcfg, srv.models)
+    if not model:
+        print(f"{url} has none of Fane's models. Pull one there first, e.g. "
+              f"ollama pull {mcfg['name']}", file=sys.stderr)
+        return 1
+    if send("ollama_use", host=url) is None:
+        set_value("model", "host", url)
+    print(f"Fane now uses Ollama at {url} ({model}).")
+    return 0
+
+
 def cmd_mail(args) -> int:
     from fane.accounts import AccountError, OnlineAccounts
     from fane.config import set_value
@@ -288,7 +325,8 @@ def main(argv: list[str] | None = None) -> None:
     r.set_defaults(fn=cmd_run)
     for name, helptext in [("toggle", "show/hide the prompt box"), ("suggest", "suggest something now"),
                            ("pause", "pause proactive suggestions"), ("resume", "resume suggestions"),
-                           ("status", "show daemon status"), ("quit", "stop the daemon")]:
+                           ("status", "show daemon status"), ("settings", "open the settings window"),
+                           ("quit", "stop the daemon")]:
         sub.add_parser(name, help=helptext).set_defaults(fn=cmd_simple)
     a = sub.add_parser("ask", help="open the prompt box and run a request")
     a.add_argument("text", nargs="+")
@@ -305,6 +343,10 @@ def main(argv: list[str] | None = None) -> None:
     ml.add_argument("action", choices=["accounts", "use", "off", "trust", "untrust", "status"])
     ml.add_argument("value", nargs="?", help="email address (for use / trust / untrust)")
     ml.set_defaults(fn=cmd_mail)
+    ol = sub.add_parser("ollama", help="find Ollama servers on your network and pick one")
+    ol.add_argument("action", choices=["scan", "use"])
+    ol.add_argument("address", nargs="?", help="host, host:port or URL (for use)")
+    ol.set_defaults(fn=cmd_ollama)
     d = sub.add_parser("doctor", help="check what works on this machine")
     d.add_argument("--screenshot", action="store_true", help="also test screen capture")
     d.set_defaults(fn=cmd_doctor)
@@ -325,6 +367,8 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     if args.cmd == "mail" and args.action in ("use", "trust", "untrust") and not args.value:
         p.error(f"fane mail {args.action} needs an email address")
+    if args.cmd == "ollama" and args.action == "use" and not args.address:
+        p.error("fane ollama use needs an address, e.g. 192.168.1.20")
     if not args.cmd:
         args = p.parse_args(["run", *(argv or sys.argv[1:])])
     sys.exit(args.fn(args))

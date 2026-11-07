@@ -25,6 +25,7 @@ RECOMMENDED_MODELS = [
 
 DEFAULTS: dict[str, Any] = {
     "model": {
+        # Ollama server. Pick one on your network in Settings or with `fane ollama use`.
         "host": "http://127.0.0.1:11434",
         # Vision-language model served by Ollama. If it isn't installed, the first
         # installed model from `fallbacks` is used instead. The three recommended

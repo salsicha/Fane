@@ -19,6 +19,7 @@ from fane.core import Core
 from fane.ui.bridge import UiBridge
 from fane.ui.overlay import Overlay
 from fane.ui.palette import Palette
+from fane.ui.settings import SettingsDialog
 from fane.ui.style import ICON_PATH
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class FaneApp:
         self.bridge = UiBridge(self)
         self.palette = Palette()
         self.overlay = Overlay(cfg["suggestions"]["corner"], place=self._place_overlay)
+        self.settings = SettingsDialog(cfg["model"])
         self.jobs: dict[int, tuple[str, str]] = {}  # job -> (origin, title)
 
         self.bridge.suggestion.connect(self._on_suggestion)
@@ -54,6 +56,9 @@ class FaneApp:
         self.overlay.expired.connect(lambda s: s and self._suggester("ignored"))
         self.overlay.insert_clicked.connect(self._insert)
         self.overlay.open_clicked.connect(self._open_answer)
+        self.settings.scan_requested.connect(self._scan_ollama)
+        self.settings.use_requested.connect(self._use_ollama)
+        self.settings.edit_config.connect(self._edit_config)
 
         self._setup_tray()
         self._setup_ipc()
@@ -88,7 +93,7 @@ class FaneApp:
         self.mail_menu = menu.addMenu("Fane's email account")
         self.mail_menu.aboutToShow.connect(self._fill_mail_menu)
         menu.addSeparator()
-        menu.addAction("Settings…", lambda: subprocess.Popen(["xdg-open", str(CONFIG_PATH)]))
+        menu.addAction("Settings…", self.open_settings)
         menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: reason == QSystemTrayIcon.Trigger
@@ -130,6 +135,10 @@ class FaneApp:
             reply.update(self.core.status())
         elif cmd == "mail_use":
             self.core.submit(self.core.select_mail_account(req.get("address", "")))
+        elif cmd == "ollama_use":
+            self.core.submit(self.core.use_ollama(req.get("host", "")))
+        elif cmd == "settings":
+            self.open_settings()
         elif cmd == "mail_reload":
             self.core.submit(self.core.reload_mail_config())
         elif cmd == "quit":
@@ -253,6 +262,29 @@ class FaneApp:
             self.overlay.show_working(job, f"Email from {who}"[:60])
         else:
             self.open_palette(prefill=f"Reply to {who}'s email \"{subject}\" (uid {uid}): ")
+
+    # --- settings: which Ollama server ------------------------------------------------------
+    def open_settings(self) -> None:
+        self.settings.present(self.core.llm.host)
+
+    def _edit_config(self) -> None:
+        subprocess.Popen(["xdg-open", str(CONFIG_PATH)])
+
+    def _on_qt(self, fut: Future, ok, fail) -> None:
+        """Deliver a core-thread result (or its error) to a callback on the Qt thread."""
+        def done(f: Future) -> None:
+            e = f.exception()
+            self.bridge._invoke.emit(lambda _: fail(str(e)) if e else ok(f.result()), None)
+        fut.add_done_callback(done)
+
+    def _scan_ollama(self) -> None:
+        self._on_qt(self.core.submit(self.core.discover_ollama()),
+                    self.settings.show_servers, self.settings.scan_failed)
+
+    def _use_ollama(self, url: str) -> None:
+        self._on_qt(self.core.submit(self.core.use_ollama(url)),
+                    lambda model: self.settings.use_done(self.core.llm.host, model),
+                    self.settings.use_failed)
 
     def set_paused(self, paused: bool) -> None:
         self.core.paused = paused

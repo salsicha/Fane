@@ -20,7 +20,8 @@ from fane.connectors.notes import Notes
 from fane.context.screen import ScreenCapture
 from fane.context.shell import ShellHelper
 from fane.context.windows import WindowInfo, focused_window, list_windows
-from fane.llm import LLMError, Ollama
+from fane.discovery import NotOllama, OllamaServer, discover, normalize_host, probe
+from fane.llm import LLMError, Ollama, choose_model
 from fane.mail.gmail import GmailClient, MailError
 from fane.mail.mailbox import AgentMailbox, mail_tool_names
 from fane.snapshot import Snapshot, is_private
@@ -183,6 +184,30 @@ class Core:
         elif not address:
             self.ui.notify("Fane's email is off")
 
+    # --- which Ollama server ---------------------------------------------------------
+    async def discover_ollama(self) -> list[OllamaServer]:
+        """Ollama servers on this computer and the local network (plus the current one)."""
+        return await discover(extra=[self.llm.host])
+
+    async def use_ollama(self, url: str) -> str:
+        """Switch to the Ollama server at `url` and save it. Returns the model it will use.
+
+        Nothing changes unless the server answers and has one of Fane's models installed.
+        """
+        url = normalize_host(url)
+        server = await probe(url)
+        mcfg = self.cfg["model"]
+        if not choose_model(mcfg, server.models):
+            raise NotOllama(f"{url} has none of Fane's models. Pull one there first, e.g. "
+                            f"ollama pull {mcfg['name']}")
+        set_value("model", "host", url)
+        for llm in {id(self.llm): self.llm, id(self.suggest_llm): self.suggest_llm}.values():
+            llm.set_host(url)
+            await llm.resolve_model()
+        log.info("switched to Ollama at %s (model %s)", url, self.llm.model)
+        self.ui.notify(f"Fane now uses Ollama at {url} ({self.llm.model})")
+        return self.llm.model
+
     # MailHost: the mailbox calls back into these.
     async def run_remote(self, prompt: str) -> str:
         exclude = set(self.cfg["agent_mail"]["remote_exclude_tools"])
@@ -282,7 +307,8 @@ class Core:
             self._agent_running = False
 
     def status(self) -> dict[str, Any]:
-        return {"model": self.llm.model, "suggest_model": self.suggest_llm.model,
+        return {"ollama_host": self.llm.host,
+                "model": self.llm.model, "suggest_model": self.suggest_llm.model,
                 "mail_account": self.mailbox.address if self.mailbox else None,
                 "mail_error": self.mail_error or (self.mailbox.error if self.mailbox else None),
                 "helper": self.helper.available,

@@ -50,6 +50,11 @@ class Ollama:
         self.last_stats: dict[str, Any] = {}
         self.totals = {"calls": 0, "eval_count": 0, "thinking_chars": 0}
 
+    def set_host(self, host: str) -> None:
+        """Point at a different Ollama server (call resolve_model() afterwards)."""
+        self.cfg["host"] = host
+        self.host = host.rstrip("/")
+
     async def installed_models(self) -> list[str]:
         r = await self._client.get(f"{self.host}/api/tags")
         r.raise_for_status()
@@ -62,12 +67,11 @@ class Ollama:
         except httpx.HTTPError as e:
             raise LLMError(f"Ollama is not reachable at {self.host}: {e}") from e
 
-        for candidate in [self.cfg["name"], *self.cfg["fallbacks"]]:
-            if found := find_installed(candidate, installed):
-                if candidate != self.cfg["name"]:
-                    log.warning("model %r not installed; using %r", self.cfg["name"], found)
-                self.model = found
-                return found
+        if found := choose_model(self.cfg, installed):
+            if find_installed(self.cfg["name"], installed) != found:
+                log.warning("model %r not installed; using %r", self.cfg["name"], found)
+            self.model = found
+            return found
         raise LLMError(
             f"No vision model installed. Try: ollama pull {self.cfg['name']}"
             f" (installed: {', '.join(installed) or 'none'})"
@@ -147,6 +151,14 @@ class Ollama:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def choose_model(cfg: dict[str, Any], installed: list[str]) -> str | None:
+    """The configured model if installed, else the first installed fallback."""
+    for candidate in [cfg["name"], *cfg["fallbacks"]]:
+        if found := find_installed(candidate, installed):
+            return found
+    return None
 
 
 def find_installed(name: str, installed: list[str]) -> str | None:

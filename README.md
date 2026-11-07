@@ -10,7 +10,7 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
 
 - **Local model.** Uses a vision model served by [Ollama](https://ollama.com) (see
   [Recommended models](#recommended-models)). No screen content leaves your machine unless
-  you delegate a task.
+  you delegate a task, or [point Fane at Ollama on another computer](#using-ollama-on-another-computer).
 - **Inserts at your cursor.** Drafts, replies and rewrites are pasted where you're already
   typing. Images work too.
 - **Talks to your apps.** It reads your notes folders and Thunderbird mail directly, and any
@@ -53,6 +53,7 @@ fane                          # run it
 | Accept a suggestion | **Run** on the corner card (or **Edit** to change the prompt first) |
 | Get a suggestion now | Tray menu → *Suggest something now*, or `fane suggest` |
 | Pause suggestions | Tray menu, or `fane pause` / `fane resume` |
+| Change settings | Tray menu → *Settings…*, or `fane settings` |
 | Script it | `fane ask "summarize this page"`, `fane toggle`, `fane status`, `fane quit` |
 
 Example requests: *"reply to this saying Thursday works"*, *"what did Dana email me about
@@ -118,6 +119,29 @@ suggest_name = "openbmb/minicpm-v4.7:35b-a3b"
 
 Both models only stay loaded at once if they fit in memory together. Otherwise Ollama
 swaps between them, which costs a reload every time.
+
+## Using Ollama on another computer
+
+If a different machine on your network has the bigger GPU, Fane can use the Ollama
+running there. Open **Settings…** from the tray menu. Fane scans this computer and your
+local network (port 11434 on every address of your subnet, which takes about a second) and
+lists each Ollama server it finds with its version, how many models it has, and which one
+Fane would use. Pick one and click **Use this server**, or type an address such as
+`192.168.1.20` or `http://gpu-box.lan:11434` if the server is on another network or port.
+
+Fane only switches if the server answers and has one of Fane's models installed. The
+choice is saved as `[model] host` and takes effect immediately, with no restart. From a
+terminal:
+
+```bash
+fane ollama scan               # list the servers Fane can find
+fane ollama use 192.168.1.20   # switch to one
+```
+
+Ollama only listens on localhost by default. To share it, set `OLLAMA_HOST=0.0.0.0:11434`
+on the server (`sudo systemctl edit ollama`, then add
+`Environment="OLLAMA_HOST=0.0.0.0:11434"` under `[Service]`) and allow port 11434 through
+its firewall.
 
 ## Evaluating models
 
@@ -224,6 +248,10 @@ around it in a few places:
   trusted addresses that pass DMARC. Emailed requests get a reduced set of tools, and
   every message to an untrusted address needs your click. The Online Accounts token
   covers the whole mailbox, so give Fane an account of its own, not your personal one.
+- With a remote Ollama server, your prompts and screenshots cross the network over plain
+  HTTP, and Ollama itself has no login, so anyone who can reach the port can use it. Only
+  do this on a network you trust, or put the server behind a VPN like Tailscale (type its
+  address by hand; the scan only covers your local subnets).
 - Claude Code and Codex run non-interactively with their default permission settings. To
   give them more autonomy, change `[delegate] claude_cmd` / `codex_cmd`.
 
