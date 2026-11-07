@@ -1,0 +1,7 @@
+{
+  "uuid": "fane-helper@salsicha.github.io",
+  "name": "Fane Helper",
+  "description": "Lets the Fane assistant see the focused window, take screenshots without prompts, and place its overlay. Exposes io.github.salsicha.Fane on the session bus.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": "https://github.com/salsicha/Fane"
+}
