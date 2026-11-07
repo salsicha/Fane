@@ -10,7 +10,8 @@ from typing import Any, Awaitable, Protocol
 
 from fane.agent import Agent, AgentResult
 from fane.config import Config
-from fane.connectors import Tool, ToolRegistry, params
+from fane.connectors import ToolRegistry
+from fane.connectors.builtin import builtin_tools
 from fane.connectors.delegate import Delegate
 from fane.connectors.mail import ThunderbirdMail
 from fane.connectors.mcp_client import MCPManager
@@ -53,7 +54,11 @@ class Core:
         self.mcp = MCPManager(cfg["mcp"].get("servers", {}))
         self.delegate = Delegate(cfg["delegate"])
         self.agent = Agent(self.llm, self.tools, cfg["model"])
-        self.suggester = Suggester(self.llm, cfg["suggestions"], cfg["model"]["max_image_side"])
+        suggest_llm = self.llm
+        if cfg["model"].get("suggest_name"):
+            suggest_llm = Ollama({**cfg["model"], "name": cfg["model"]["suggest_name"]})
+        self.suggest_llm = suggest_llm
+        self.suggester = Suggester(suggest_llm, cfg["suggestions"], cfg["model"]["max_image_side"])
         self.paused = not cfg["suggestions"]["enabled"]
         self.ready = False
         self.last_snapshot: Snapshot | None = None
@@ -82,6 +87,8 @@ class Core:
     async def _shutdown(self) -> None:
         await self.mcp.stop()
         await self.llm.aclose()
+        if self.suggest_llm is not self.llm:
+            await self.suggest_llm.aclose()
         me = asyncio.current_task()
         for task in asyncio.all_tasks():
             if task is not me:
@@ -90,12 +97,12 @@ class Core:
     # --- lifecycle ---------------------------------------------------------------
     async def _startup(self) -> None:
         await self.helper.connect()
-        try:
-            model = await self.llm.resolve_model()
-            log.info("using model %s", model)
-        except LLMError as e:
-            log.error("%s", e)
-            self.ui.notify(str(e))
+        for llm in {id(self.llm): self.llm, id(self.suggest_llm): self.suggest_llm}.values():
+            try:
+                log.info("using model %s", await llm.resolve_model())
+            except LLMError as e:
+                log.error("%s", e)
+                self.ui.notify(str(e))
         self._register_builtin_tools()
         await self.mcp.start(self.tools)
         self.ready = True
@@ -106,38 +113,18 @@ class Core:
         notes = Notes(c["notes_dirs"])
         mail = ThunderbirdMail(c["thunderbird_profiles"])
         ui = self.ui
-        add = self.tools.add
-        S = lambda t, d="": {"type": t, "description": d}  # noqa: E731
-
-        add(Tool("insert_text", "Insert text at the user's text cursor in the focused app "
-                 "(as if pasted). Use for drafting, replying, filling in, rewriting.",
-                 params(["text"], text=S("string", "The exact text to insert")),
-                 lambda text: ui.insert_text(text), "Inserting"))
-        add(Tool("insert_image", "Paste an image file at the user's cursor.",
-                 params(["path"], path=S("string", "Absolute path to a PNG/JPEG file")),
-                 lambda path: ui.insert_image(path), "Inserting image"))
-        add(Tool("read_clipboard", "Read the current clipboard text.", params(),
-                 lambda: ui.read_clipboard(), "Reading clipboard"))
-        add(Tool("list_windows", "List the user's open windows/apps with titles.", params(),
-                 lambda: list_windows(self.helper), "Looking at open apps"))
-        add(Tool("search_notes", "Search the user's notes (Markdown/text folders). "
-                 "Returns paths, titles and snippets.",
-                 params(["query"], query=S("string", "Keywords"), limit=S("integer")),
-                 notes.search, "Searching notes"))
-        add(Tool("read_note", "Read a note's full text by path (from search_notes).",
-                 params(["path"], path=S("string")), notes.read, "Reading note"))
-        add(Tool("recent_emails", "Recent inbox email from the local Thunderbird client, newest first.",
-                 params([], limit=S("integer", "How many (default 10)"),
-                        query=S("string", "Optional filter text"),
-                        include_body=S("boolean", "Return full bodies")),
-                 mail.recent, "Checking email"))
-        if agents := self.delegate.available():
-            add(Tool("delegate", "Hand a difficult task (coding, debugging, multi-step research) to "
-                     f"a stronger coding agent. Available: {', '.join(agents)}. Returns its final output.",
-                     params(["agent", "task"], agent={"type": "string", "enum": agents},
-                            task=S("string", "Complete, self-contained task description"),
-                            cwd=S("string", "Working directory (optional)")),
-                     self.delegate.run, "Delegating"))
+        handlers = {
+            "insert_text": lambda text: ui.insert_text(text),
+            "insert_image": lambda path: ui.insert_image(path),
+            "read_clipboard": lambda: ui.read_clipboard(),
+            "list_windows": lambda: list_windows(self.helper),
+            "search_notes": notes.search,
+            "read_note": notes.read,
+            "recent_emails": mail.recent,
+            "delegate": self.delegate.run,
+        }
+        for tool in builtin_tools(handlers, self.delegate.available()):
+            self.tools.add(tool)
 
     # --- context -------------------------------------------------------------------
     async def snapshot(self, with_screen: bool = True) -> Snapshot:
@@ -214,7 +201,7 @@ class Core:
             self._agent_running = False
 
     def status(self) -> dict[str, Any]:
-        return {"model": self.llm.model, "helper": self.helper.available,
+        return {"model": self.llm.model, "suggest_model": self.suggest_llm.model, "helper": self.helper.available,
                 "screen_backend": self.screen.backend, "paused": self.paused,
                 "tools": sorted(self.tools.tools), "ready": self.ready}
 

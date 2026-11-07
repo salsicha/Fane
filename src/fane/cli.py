@@ -145,7 +145,8 @@ def cmd_doctor(args) -> int:
     from fane.context.screen import ScreenCapture
     from fane.context.shell import ShellHelper
     from fane.context.windows import focused_window
-    from fane.llm import LLMError, Ollama
+    from fane.config import RECOMMENDED_MODELS
+    from fane.llm import LLMError, Ollama, find_installed
 
     cfg = Config.load()
     ok = lambda b: "✓" if b else "✗"  # noqa: E731
@@ -156,6 +157,10 @@ def cmd_doctor(args) -> int:
         llm = Ollama(cfg["model"])
         try:
             print(f"{ok(True)} model: {await llm.resolve_model()}")
+            installed = await llm.installed_models()
+            for name in RECOMMENDED_MODELS:
+                have = find_installed(name, installed)
+                print(f"  {ok(bool(have))} recommended {name}" + ("" if have else f" — ollama pull {name}"))
         except LLMError as e:
             print(f"{ok(False)} model: {e}")
         helper = ShellHelper()
@@ -185,6 +190,38 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def cmd_eval(args) -> int:
+    import datetime as dt
+
+    from fane.config import RECOMMENDED_MODELS
+    from fane.evals.runner import EvalRunner, save
+    from fane.evals.scenarios import AGENT_TASKS, SUGGEST_CASES
+
+    if args.list:
+        for c in SUGGEST_CASES:
+            print(f"suggest  {c.scene:<18} expect: {c.expect or 'not scored'}")
+        for t in AGENT_TASKS:
+            print(f"agent    {t.name:<18} {t.prompt}")
+        return 0
+    cfg = Config.load()
+    if args.num_ctx:
+        cfg["model"]["num_ctx"] = args.num_ctx
+    if args.temperature is not None:
+        cfg["model"]["temperature"] = args.temperature
+    if args.tool_mode:
+        cfg["model"]["tool_mode"] = args.tool_mode
+    models = args.models or RECOMMENDED_MODELS
+    out = Path(args.out) if args.out else STATE_DIR / "evals" / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    if send("status") is not None:
+        print("Note: Fane is running; pause it (`fane pause`) so it doesn't compete for the GPU.")
+    runner = EvalRunner(cfg, repeat=args.repeat, only=args.only, select=args.filter, timeout=args.timeout)
+    res = asyncio.run(runner.run(models))
+    report = save(res, out)
+    print("\n" + report.read_text())
+    print(f"Saved {report} (full transcripts in results.json, screens in scenes/).")
+    return 0 if any(m["status"] == "ok" for m in res["models"]) else 1
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="fane", description="Unobtrusive local desktop assistant.")
     sub = p.add_subparsers(dest="cmd")
@@ -210,6 +247,19 @@ def main(argv: list[str] | None = None) -> None:
     d = sub.add_parser("doctor", help="check what works on this machine")
     d.add_argument("--screenshot", action="store_true", help="also test screen capture")
     d.set_defaults(fn=cmd_doctor)
+
+    e = sub.add_parser("eval", help="compare local models on Fane's prompts and tools")
+    e.add_argument("--models", nargs="+", help="Ollama tags (default: the three recommended models)")
+    e.add_argument("--repeat", type=int, default=1, help="run each case N times")
+    e.add_argument("--only", choices=["suggest", "agent"], help="run one half of the suite")
+    e.add_argument("--filter", help="only cases whose name contains this")
+    e.add_argument("--timeout", type=float, default=600, help="seconds per case")
+    e.add_argument("--num-ctx", type=int, help="override [model] num_ctx")
+    e.add_argument("--temperature", type=float, help="override [model] temperature")
+    e.add_argument("--tool-mode", choices=["auto", "native", "json"], help="override [model] tool_mode")
+    e.add_argument("--out", help="output directory (default ~/.local/state/fane/evals/<time>)")
+    e.add_argument("--list", action="store_true", help="list the cases and exit")
+    e.set_defaults(fn=cmd_eval)
 
     args = p.parse_args(argv)
     if not args.cmd:

@@ -107,24 +107,35 @@ class Suggester:
         return any(difflib.SequenceMatcher(None, t, r.lower()).ratio() > 0.75
                    for r in self.recent_titles[-20:])
 
-    async def step(self, snap: Snapshot, force: bool = False) -> Suggestion | None:
-        if snap.image is None or not self.should_look(snap, force):
-            return None
-        self._last_snap = snap
+    async def propose(self, snap: Snapshot) -> tuple[str, list[dict[str, Any]]]:
+        """One model call: returns (activity, raw suggestions), with no filtering."""
         prompt = PROMPT.format(window=snap.window.label,
                                history=" | ".join(self.history[-4:]) or "none",
                                recent="; ".join(self.recent_titles[-8:]) or "none")
         data = await self.llm.chat_json(
             [{"role": "user", "content": prompt,
               "images": [encode_image(snap.image, self.max_image_side)]}], SCHEMA)
-        activity = str(data.get("activity", "")).strip()
+        if not isinstance(data, dict):
+            return "", []
+        raw = data.get("suggestions")
+        raw = raw if isinstance(raw, list) else []
+        return str(data.get("activity", "")).strip(), [s for s in raw if isinstance(s, dict)]
+
+    async def step(self, snap: Snapshot, force: bool = False) -> Suggestion | None:
+        if snap.image is None or not self.should_look(snap, force):
+            return None
+        self._last_snap = snap
+        activity, raw = await self.propose(snap)
         if activity:
             self.history = (self.history + [activity])[-12:]
         log.info("activity: %s", activity)
         min_conf = 0.0 if force else self.cfg["min_confidence"]
-        for s in data.get("suggestions") or []:
+        for s in raw:
             title, text = str(s.get("title", "")).strip(), str(s.get("prompt", "")).strip()
-            conf = float(s.get("confidence", 0) or 0)
+            try:
+                conf = float(s.get("confidence", 0) or 0)
+            except (TypeError, ValueError):
+                conf = 0.0
             if not title or not text or conf < min_conf or (self._is_repeat(title) and not force):
                 log.info("skipped suggestion %r (%.2f)", title, conf)
                 continue

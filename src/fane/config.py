@@ -14,18 +14,34 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/fane-{os.getuid()}"))
 SOCKET_PATH = RUNTIME_DIR / "fane.sock"
 
+# Recommended local vision models (Ollama tags), in default preference order.
+RECOMMENDED_MODELS = [
+    "gemma4:31b",                       # Gemma 4 31B, dense, native tools
+    "qwen3.8:27b",                      # Qwen 3.8 27B, dense, native tools
+    "openbmb/minicpm-v4.7:35b-a3b",     # MiniCPM-V 4.7 35B MoE (3B active), JSON tool calls
+]
+
 DEFAULTS: dict[str, Any] = {
     "model": {
         "host": "http://127.0.0.1:11434",
         # Vision-language model served by Ollama. If it isn't installed, the first
-        # installed model from `fallbacks` is used instead.
-        "name": "gemma4",
-        "fallbacks": ["gemma4", "minicpm-v", "qwen3-vl", "qwen2.5vl", "llava"],
+        # installed model from `fallbacks` is used instead. The three recommended
+        # models are compared by `fane eval`.
+        "name": "gemma4:31b",
+        "fallbacks": [*RECOMMENDED_MODELS, "gemma4", "qwen3.8", "minicpm-v4.7",
+                      "qwen3-vl", "minicpm-v", "qwen2.5vl", "llava"],
+        # Optional different (e.g. faster) model just for proactive suggestions.
+        # Note: two models only stay loaded together if both fit in memory.
+        "suggest_name": "",
+        # "auto" uses Ollama's native tool calling and falls back to a JSON protocol
+        # for models without it (MiniCPM-V 4.7). Force with "native" or "json".
+        "tool_mode": "auto",
         "temperature": 0.3,
         "keep_alive": "15m",
         # A modest context keeps the model fully on the GPU, which matters far more for
         # latency than long memory does here.
         "num_ctx": 8192,
+        "json_max_tokens": 1536,
         "max_image_side": 1280,
         "timeout": 300,
     },
@@ -78,7 +94,10 @@ DEFAULT_TEMPLATE = """\
 # (see src/fane/config.py for the full list).
 
 [model]
-name = "gemma4"            # any Ollama vision model, e.g. "minicpm-v", "qwen3-vl"
+# Recommended: "gemma4:31b", "qwen3.8:27b", "openbmb/minicpm-v4.7:35b-a3b".
+# Compare them on this machine with `fane eval`.
+name = "gemma4:31b"
+# suggest_name = "openbmb/minicpm-v4.7:35b-a3b"   # optional separate model for suggestions
 host = "http://127.0.0.1:11434"
 
 [suggestions]
