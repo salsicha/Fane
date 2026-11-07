@@ -24,6 +24,7 @@ class UiBridge(QObject):
     status = Signal(int, str)
     done = Signal(int, object, object)
     notice = Signal(str)
+    mail = Signal(object)
 
     def __init__(self, app: Any):
         super().__init__()
@@ -60,7 +61,15 @@ class UiBridge(QObject):
 
     def is_busy(self) -> bool:
         # Plain attribute reads, safe enough across threads.
-        return self.busy or self.app.overlay.suggestion is not None
+        return self.busy or self.app.overlay.suggestion is not None or self.app.overlay.confirming
+
+    def show_mail(self, info) -> None:
+        self.mail.emit(info)
+
+    def confirm_send(self, details):
+        """Ask the user (Send/Cancel card) before an email goes out; resolves to bool."""
+        return self._call(lambda fut: self.app.overlay.show_confirm(
+            details, lambda ok: fut.done() or fut.set_result(bool(ok))))
 
     def read_clipboard(self):
         def fn(fut: Future) -> None:

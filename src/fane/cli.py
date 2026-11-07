@@ -181,6 +181,8 @@ def cmd_doctor(args) -> int:
         xcb = Path("/usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0").exists()
         print(f"{ok(xcb)} libxcb-cursor0 (lets the overlay sit in a corner via XWayland)"
               + ("" if xcb else " — sudo apt install libxcb-cursor0"))
+        mail = cfg["agent_mail"].get("account", "")
+        print(f"{ok(bool(mail))} Fane's email: {mail or 'off (fane mail accounts / fane mail use)'}")
         servers = cfg["mcp"].get("servers", {})
         print(f"  MCP servers configured: {', '.join(servers) or 'none'}")
         print(f"  running: {'yes' if send('status') else 'no'}")
@@ -222,6 +224,61 @@ def cmd_eval(args) -> int:
     return 0 if any(m["status"] == "ok" for m in res["models"]) else 1
 
 
+def cmd_mail(args) -> int:
+    from fane.accounts import AccountError, OnlineAccounts
+    from fane.config import set_value
+
+    cfg = Config.load()
+    mcfg = cfg["agent_mail"]
+    current = mcfg.get("account", "")
+
+    async def accounts():
+        return await OnlineAccounts().google_accounts()
+
+    if args.action in ("accounts", "use"):
+        try:
+            accs = asyncio.run(accounts())
+        except AccountError as e:
+            print(e, file=sys.stderr)
+            return 1
+    if args.action == "accounts":
+        if not accs:
+            print("No Google accounts in Settings → Online Accounts. Add the agent's account there.")
+        for a in accs:
+            mark = "●" if a.email.lower() == current.lower() else "○"
+            note = "  (mail switched off in Settings)" if a.mail_disabled else ""
+            print(f"{mark} {a.email}{note}")
+        print(f"\nFane uses: {current or 'nothing (email off)'}. Change with `fane mail use ADDRESS`.")
+        return 0
+    if args.action in ("use", "off"):
+        address = "" if args.action == "off" else args.value
+        if address and not any(a.email.lower() == address.lower() for a in accs):
+            print(f"{address} isn't in Settings → Online Accounts (see `fane mail accounts`).", file=sys.stderr)
+            return 1
+        if send("mail_use", address=address) is None:
+            set_value("agent_mail", "account", address)
+        print(f"Fane's email account: {address}" if address else "Fane's email is off.")
+        return 0
+    if args.action in ("trust", "untrust"):
+        trusted = [t for t in mcfg.get("trusted_senders", []) if t.lower() != args.value.lower()]
+        if args.action == "trust":
+            trusted.append(args.value.lower())
+        set_value("agent_mail", "trusted_senders", trusted)
+        send("mail_reload")
+        print("Trusted senders:", ", ".join(trusted) or "none")
+        return 0
+    # status
+    reply = send("status")
+    print(f"account:  {current or '(off)'}")
+    print(f"trusted:  {', '.join(mcfg.get('trusted_senders', [])) or 'none'}")
+    if reply:
+        print(f"running:  watching {reply.get('mail_account') or 'nothing'}"
+              + (f" — error: {reply['mail_error']}" if reply.get("mail_error") else ""))
+    else:
+        print("running:  no (start Fane with `fane`)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="fane", description="Unobtrusive local desktop assistant.")
     sub = p.add_subparsers(dest="cmd")
@@ -244,6 +301,10 @@ def main(argv: list[str] | None = None) -> None:
     au = sub.add_parser("autostart", help="start Fane when you log in")
     au.add_argument("state", choices=["on", "off"])
     au.set_defaults(fn=cmd_autostart)
+    ml = sub.add_parser("mail", help="Fane's own email account (from Settings → Online Accounts)")
+    ml.add_argument("action", choices=["accounts", "use", "off", "trust", "untrust", "status"])
+    ml.add_argument("value", nargs="?", help="email address (for use / trust / untrust)")
+    ml.set_defaults(fn=cmd_mail)
     d = sub.add_parser("doctor", help="check what works on this machine")
     d.add_argument("--screenshot", action="store_true", help="also test screen capture")
     d.set_defaults(fn=cmd_doctor)
@@ -262,6 +323,8 @@ def main(argv: list[str] | None = None) -> None:
     e.set_defaults(fn=cmd_eval)
 
     args = p.parse_args(argv)
+    if args.cmd == "mail" and args.action in ("use", "trust", "untrust") and not args.value:
+        p.error(f"fane mail {args.action} needs an email address")
     if not args.cmd:
         args = p.parse_args(["run", *(argv or sys.argv[1:])])
     sys.exit(args.fn(args))

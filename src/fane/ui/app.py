@@ -43,6 +43,8 @@ class FaneApp:
         self.bridge.status.connect(self._on_status)
         self.bridge.done.connect(self._on_done)
         self.bridge.notice.connect(lambda t: self.overlay.toast(t, 6))
+        self.bridge.mail.connect(lambda info: self.overlay.show_mail(info))
+        self.overlay.mail_action.connect(self._on_mail_action)
         self.palette.submitted.connect(self._on_submit)
         self.palette.insert_requested.connect(self._insert)
         self.palette.hidden.connect(lambda: setattr(self.bridge, "busy", False))
@@ -83,6 +85,8 @@ class FaneApp:
         self.pause_action.setChecked(self.core.paused)
         self.pause_action.toggled.connect(self.set_paused)
         menu.addAction(self.pause_action)
+        self.mail_menu = menu.addMenu("Fane's email account")
+        self.mail_menu.aboutToShow.connect(self._fill_mail_menu)
         menu.addSeparator()
         menu.addAction("Settings…", lambda: subprocess.Popen(["xdg-open", str(CONFIG_PATH)]))
         menu.addAction("Quit", self.quit)
@@ -124,6 +128,10 @@ class FaneApp:
             self.pause_action.setChecked(cmd == "pause")
         elif cmd == "status":
             reply.update(self.core.status())
+        elif cmd == "mail_use":
+            self.core.submit(self.core.select_mail_account(req.get("address", "")))
+        elif cmd == "mail_reload":
+            self.core.submit(self.core.reload_mail_config())
         elif cmd == "quit":
             QTimer.singleShot(50, self.quit)
         else:
@@ -208,6 +216,43 @@ class FaneApp:
     def _insert(self, text: str) -> None:
         if text:
             self.bridge._insert(Future(), text=text)
+
+    # --- Fane's email --------------------------------------------------------------------------
+    def _fill_mail_menu(self) -> None:
+        menu = self.mail_menu
+        menu.clear()
+        current = self.cfg["agent_mail"].get("account", "").lower()
+        try:
+            accounts = self.core.submit(self.core.accounts.google_accounts()).result(timeout=2)
+        except Exception as e:
+            accounts = []
+            menu.addAction(f"Online Accounts unavailable: {e}").setEnabled(False)
+        for acc in accounts:
+            label = acc.email + (" (mail off in Settings)" if acc.mail_disabled else "")
+            action = menu.addAction(label, lambda a=acc.email: self._use_mail(a))
+            action.setCheckable(True)
+            action.setChecked(acc.email.lower() == current)
+            action.setEnabled(not acc.mail_disabled)
+        if not accounts:
+            menu.addAction("No Google accounts in Online Accounts").setEnabled(False)
+        off = menu.addAction("Off (no email access)", lambda: self._use_mail(""))
+        off.setCheckable(True)
+        off.setChecked(not current)
+        menu.addSeparator()
+        menu.addAction("Add or manage accounts…",
+                       lambda: subprocess.Popen(["gnome-control-center", "online-accounts"]))
+
+    def _use_mail(self, address: str) -> None:
+        self.core.submit(self.core.select_mail_account(address))
+
+    def _on_mail_action(self, action: str, info: dict) -> None:
+        who, subject, uid = info["from"], info["subject"], info["uid"]
+        if action == "summarize":
+            job = self.core.ask(f"Summarize the email from {who} in your own inbox (uid {uid}).", None)
+            self.jobs[job] = ("overlay", f"Email from {who}"[:60])
+            self.overlay.show_working(job, f"Email from {who}"[:60])
+        else:
+            self.open_palette(prefill=f"Reply to {who}'s email \"{subject}\" (uid {uid}): ")
 
     def set_paused(self, paused: bool) -> None:
         self.core.paused = paused

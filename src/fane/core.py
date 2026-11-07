@@ -8,8 +8,9 @@ import threading
 from concurrent.futures import Future
 from typing import Any, Awaitable, Protocol
 
+from fane.accounts import AccountError, OnlineAccounts
 from fane.agent import Agent, AgentResult
-from fane.config import Config
+from fane.config import Config, set_value
 from fane.connectors import ToolRegistry
 from fane.connectors.builtin import builtin_tools
 from fane.connectors.delegate import Delegate
@@ -20,6 +21,8 @@ from fane.context.screen import ScreenCapture
 from fane.context.shell import ShellHelper
 from fane.context.windows import WindowInfo, focused_window, list_windows
 from fane.llm import LLMError, Ollama
+from fane.mail.gmail import GmailClient, MailError
+from fane.mail.mailbox import AgentMailbox, mail_tool_names
 from fane.snapshot import Snapshot, is_private
 from fane.suggester import Suggester, Suggestion
 
@@ -39,6 +42,8 @@ class UIPort(Protocol):
     def job_done(self, job: int, result: AgentResult | None, error: str | None) -> None: ...
     def notify(self, text: str) -> None: ...
     def is_busy(self) -> bool: ...
+    def show_mail(self, info: dict[str, Any]) -> None: ...
+    def confirm_send(self, details: dict[str, Any]) -> Awaitable[bool]: ...
 
 
 class Core:
@@ -65,6 +70,9 @@ class Core:
         self._job_seq = 0
         self._agent_running = False
         self._wake = asyncio.Event()
+        self.accounts = OnlineAccounts()
+        self.mailbox: AgentMailbox | None = None
+        self.mail_error: str | None = None
 
     # --- thread plumbing --------------------------------------------------------
     def start(self, ui: UIPort) -> None:
@@ -85,6 +93,8 @@ class Core:
         self.loop.call_soon_threadsafe(self.loop.stop)
 
     async def _shutdown(self) -> None:
+        if self.mailbox:
+            await self.mailbox.stop()
         await self.mcp.stop()
         await self.llm.aclose()
         if self.suggest_llm is not self.llm:
@@ -105,6 +115,7 @@ class Core:
                 self.ui.notify(str(e))
         self._register_builtin_tools()
         await self.mcp.start(self.tools)
+        await self.setup_mail()
         self.ready = True
         asyncio.create_task(self._suggest_loop())
 
@@ -125,6 +136,76 @@ class Core:
         }
         for tool in builtin_tools(handlers, self.delegate.available()):
             self.tools.add(tool)
+
+    # --- Fane's own email ---------------------------------------------------------
+    async def setup_mail(self) -> None:
+        """(Re)connect to the one Online Accounts mailbox the user selected, if any."""
+        if self.mailbox:
+            await self.mailbox.stop()
+            self.mailbox = None
+        for name in mail_tool_names():
+            self.tools.remove(name)
+        self.mail_error = None
+        mcfg = self.cfg["agent_mail"]
+        address = mcfg.get("account", "").strip()
+        if not address:
+            return
+        try:
+            acc = await self.accounts.find(address)
+            if acc is None:
+                raise AccountError(f"{address} isn't in Settings → Online Accounts")
+            client = GmailClient(acc.email, lambda: self.accounts.access_token(acc),
+                                 acc.imap_host, acc.smtp_host)
+            mailbox = AgentMailbox(client, mcfg, self)
+            await mailbox.start()
+        except (AccountError, MailError, OSError) as e:
+            self.mail_error = str(e)
+            log.warning("agent email disabled: %s", e)
+            self.ui.notify(f"Fane's email is off: {e}")
+            return
+        self.mailbox = mailbox
+        for tool in mailbox.tools():
+            self.tools.add(tool)
+
+    async def reload_mail_config(self) -> None:
+        """Re-read [agent_mail] from disk (after `fane mail trust` etc.) and reconnect."""
+        fresh = Config.load()["agent_mail"]
+        self.cfg["agent_mail"].clear()
+        self.cfg["agent_mail"].update(fresh)
+        await self.setup_mail()
+
+    async def select_mail_account(self, address: str) -> None:
+        set_value("agent_mail", "account", address)
+        self.cfg["agent_mail"]["account"] = address
+        await self.setup_mail()
+        if address and self.mailbox:
+            self.ui.notify(f"Fane now uses {address} for email")
+        elif not address:
+            self.ui.notify("Fane's email is off")
+
+    # MailHost: the mailbox calls back into these.
+    async def run_remote(self, prompt: str) -> str:
+        exclude = set(self.cfg["agent_mail"]["remote_exclude_tools"])
+        agent = Agent(self.llm, self.tools.without(exclude), self.cfg["model"])
+        if self.cfg["agent_mail"]["remote_can_see_screen"]:
+            snap = await self.snapshot()
+        else:
+            snap = Snapshot(window=WindowInfo(title="(the user is away; screen not shared)"))
+        self._agent_running = True
+        try:
+            result = await agent.run(prompt, snap, self.suggester.history, lambda s: None)
+        finally:
+            self._agent_running = False
+        return result.text
+
+    def show_mail(self, info: dict[str, Any]) -> None:
+        self.ui.show_mail(info)
+
+    def notify(self, text: str) -> None:
+        self.ui.notify(text)
+
+    def confirm_send(self, details: dict[str, Any]):
+        return self.ui.confirm_send(details)
 
     # --- context -------------------------------------------------------------------
     async def snapshot(self, with_screen: bool = True) -> Snapshot:
@@ -201,7 +282,10 @@ class Core:
             self._agent_running = False
 
     def status(self) -> dict[str, Any]:
-        return {"model": self.llm.model, "suggest_model": self.suggest_llm.model, "helper": self.helper.available,
+        return {"model": self.llm.model, "suggest_model": self.suggest_llm.model,
+                "mail_account": self.mailbox.address if self.mailbox else None,
+                "mail_error": self.mail_error or (self.mailbox.error if self.mailbox else None),
+                "helper": self.helper.available,
                 "screen_backend": self.screen.backend, "paused": self.paused,
                 "tools": sorted(self.tools.tools), "ready": self.ready}
 

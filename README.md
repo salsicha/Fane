@@ -15,6 +15,8 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
   typing. Images work too.
 - **Talks to your apps.** It reads your notes folders and Thunderbird mail directly, and any
   app that has an MCP server (Gmail, calendars, Slack, Obsidian, the filesystem and so on).
+- **Has its own email.** Give it a Gmail account through Ubuntu's Online Accounts. You
+  can email it tasks from anywhere, and it replies.
 - **Delegates the hard stuff.** Coding and long multi-step tasks go to Claude Code or Codex.
 - **Stays out of the way.** It only re-reads the screen when something changed, suggests at
   most one thing at a time, and backs off further each time you dismiss a suggestion. It
@@ -56,6 +58,36 @@ fane                          # run it
 Example requests: *"reply to this saying Thursday works"*, *"what did Dana email me about
 the review?"*, *"find my notes on the Q3 plan and summarize them"*, *"fix the failing test
 in ~/code/api"* (which gets delegated to Claude Code or Codex).
+
+## Fane's own email
+
+Fane can have its own Gmail address. It uses the Google sign-in built into Ubuntu
+(Settings → Online Accounts), so Fane never sees or stores a password. It asks Online
+Accounts for a short-lived token for **one account that you choose**.
+
+1. Settings → Online Accounts → Google: sign in to the agent's account and keep **Mail**
+   switched on.
+2. Pick that account with `fane mail use agent@gmail.com`, or in the tray under
+   *Fane's email account*. Your other Google accounts stay untouched. If you don't choose
+   one, email stays off; Fane never falls back to another account.
+3. Mark yourself as trusted with `fane mail trust you@gmail.com`.
+
+How Fane handles mail:
+
+| Situation | What Fane does |
+| --- | --- |
+| Mail from a trusted address that passes Google's DMARC check | Runs it as a request and replies in the same thread. It can't type on your desktop, delegate to coding agents, send other mail or see your screen (all configurable), and it sends at most 20 auto-replies an hour. |
+| Mail from anyone else | Shows a card with **Summarize** and **Reply…** buttons. The content is passed to the model marked as untrusted data, never as instructions. |
+| The agent wants to email someone you haven't trusted | Shows a **Send this email?** card with the full message. Nothing is sent unless you click Send, and an unanswered card cancels after 3 minutes. |
+| You ask it about its mail | Uses the `fane_inbox`, `fane_read_email`, `fane_send_email` and `fane_reply_email` tools (separate from `recent_emails`, which reads *your* Thunderbird). |
+
+Trust needs Gmail's own verdict: the topmost `Authentication-Results` header, which
+mx.google.com adds, has to show `dmarc=pass` for the sender's domain. A forged `From:` line
+isn't enough. Other commands: `fane mail accounts`, `fane mail off`, `fane mail untrust …`
+and `fane mail status`.
+
+Chat isn't supported. Google's Chat API only works with Workspace accounts, not personal
+Gmail.
 
 ## Recommended models
 
@@ -136,6 +168,11 @@ blocked_titles = ["Private Browsing", "Incognito", "password"]
 [connectors]
 notes_dirs = ["~/Notes", "~/Obsidian"]
 
+[agent_mail]
+account = "my-assistant@gmail.com"  # from Settings → Online Accounts; empty = email off
+trusted_senders = ["me@gmail.com"]  # DMARC-verified mail from these runs as requests
+remote_can_see_screen = false
+
 [mcp.servers.filesystem]          # any stdio MCP server; its tools become available
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/Documents"]
@@ -183,6 +220,10 @@ around it in a few places:
 - Pasting needs write access to `/dev/uinput`. Some distros grant this to the logged-in
   user, and some need a udev rule or the `input` group. That access also lets a process
   type anywhere.
+- Fane's mailbox is a way in from the internet, so it only takes instructions from
+  trusted addresses that pass DMARC. Emailed requests get a reduced set of tools, and
+  every message to an untrusted address needs your click. The Online Accounts token
+  covers the whole mailbox, so give Fane an account of its own, not your personal one.
 - Claude Code and Codex run non-interactively with their default permission settings. To
   give them more autonomy, change `[delegate] claude_cmd` / `codex_cmd`.
 

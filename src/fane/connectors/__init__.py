@@ -37,6 +37,14 @@ class ToolRegistry:
     def add(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
 
+    def remove(self, name: str) -> None:
+        self.tools.pop(name, None)
+
+    def without(self, names: set[str]) -> "ToolRegistry":
+        reg = ToolRegistry()
+        reg.tools = {k: v for k, v in self.tools.items() if k not in names}
+        return reg
+
     def specs(self) -> list[dict[str, Any]]:
         return [t.spec() for t in self.tools.values()]
 

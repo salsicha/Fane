@@ -22,6 +22,7 @@ class Overlay(QWidget):
     expired = Signal(object)            # Suggestion | None
     insert_clicked = Signal(str)
     open_clicked = Signal(str)
+    mail_action = Signal(str, object)   # ("summarize" | "reply", mail info)
 
     def __init__(self, corner: str = "top-right", place: Callable[[int, int], None] | None = None):
         flags = (Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -78,9 +79,25 @@ class Overlay(QWidget):
         self.fade.setEasingCurve(QEasingCurve.OutCubic)
         self.fade.finished.connect(self._fade_done)
         self._after_fade: Callable[[], None] | None = None
+        # A pending "send this email?" question owns the card until answered;
+        # anything else that wants the card waits in line.
+        self._confirm_cb: Callable[[bool], None] | None = None
+        self._deferred: list[Callable[[], None]] = []
+
+    @property
+    def confirming(self) -> bool:
+        return self._confirm_cb is not None
+
+    def _defer(self, fn: Callable[[], None]) -> bool:
+        if self._confirm_cb is None:
+            return False
+        self._deferred.append(fn)
+        return True
 
     # --- modes ----------------------------------------------------------------------
     def show_suggestion(self, s, seconds: int) -> None:
+        if self.confirming:
+            return  # stale by the time the user is free; drop it
         self.suggestion, self.job, self.result_text = s, None, ""
         self.meta.setText(_short(s.window))
         self.title.setText(s.title)
@@ -90,6 +107,8 @@ class Overlay(QWidget):
         self._present(seconds)
 
     def show_working(self, job: int, title: str, status: str = "Working…") -> None:
+        if self._defer(lambda: self.show_working(job, title, status)):
+            return
         self.suggestion, self.job = None, job
         self.meta.setText("")
         self.title.setText(title)
@@ -98,10 +117,12 @@ class Overlay(QWidget):
         self._present(0)
 
     def update_status(self, job: int, status: str) -> None:
-        if self.job == job and self.isVisible():
+        if self.job == job and self.isVisible() and not self.confirming:
             self.body.setText(status)
 
     def show_result(self, job: int, title: str, text: str, error: bool = False) -> None:
+        if self._defer(lambda: self.show_result(job, title, text, error)):
+            return
         if self.job not in (None, job):
             return
         self.suggestion, self.job, self.result_text = None, job, text
@@ -116,6 +137,8 @@ class Overlay(QWidget):
         self._present(45)
 
     def toast(self, text: str, seconds: int = 4) -> None:
+        if self._defer(lambda: self.toast(text, seconds)):
+            return
         if self.suggestion is not None and self.isVisible():
             return  # don't clobber a pending suggestion with a notice
         self.suggestion, self.job = None, None
@@ -124,6 +147,46 @@ class Overlay(QWidget):
         self._set_body("", max_h=0)
         self._set_buttons([])
         self._present(seconds)
+
+    def show_mail(self, info: dict, seconds: int = 40) -> None:
+        if self._defer(lambda: self.show_mail(info, seconds)):
+            return
+        self.suggestion, self.job = None, None
+        self.meta.setText("· new email")
+        self.title.setText(f"{info['from']}")
+        self._set_body(f"{info['subject']}\n\n{info['snippet']}", max_h=90, markdown=False)
+        self._set_buttons([("Summarize", lambda: self._mail(info, "summarize")),
+                           ("Reply…", lambda: self._mail(info, "reply"), True)])
+        self._present(seconds)
+
+    def show_confirm(self, details: dict, callback: Callable[[bool], None]) -> None:
+        if self._defer(lambda: self.show_confirm(details, callback)):
+            return
+        self._confirm_cb = callback
+        self.suggestion, self.job = None, None
+        to = ", ".join(details["to"] + details.get("cc", []))
+        self.meta.setText(f"· from {details['from']}")
+        self.title.setText("Send this email?")
+        self._set_body(f"To: {to}\nSubject: {details['subject']}\n\n{details['body']}",
+                       max_h=220, markdown=False)
+        self._set_buttons([("Cancel", lambda: self._resolve(False)),
+                           ("Send", lambda: self._resolve(True), True)])
+        self._present(180)  # unanswered = not sent
+
+    def _resolve(self, ok: bool) -> None:
+        cb, self._confirm_cb = self._confirm_cb, None
+        self._fade_out()
+        if cb:
+            cb(ok)
+        QTimer.singleShot(250, self._drain)
+
+    def _drain(self) -> None:
+        while self._deferred and not self.confirming:
+            self._deferred.pop(0)()
+
+    def _mail(self, info: dict, action: str) -> None:
+        self._fade_out()
+        self.mail_action.emit(action, info)
 
     # --- internals -------------------------------------------------------------------
     def _set_body(self, text: str, max_h: int, markdown: bool = True) -> None:
@@ -192,6 +255,9 @@ class Overlay(QWidget):
         signal.emit(text)
 
     def _dismiss(self) -> None:
+        if self.confirming:
+            self._resolve(False)
+            return
         s = self.suggestion
         self.suggestion = None
         self._fade_out()
@@ -200,6 +266,9 @@ class Overlay(QWidget):
     def _expire(self) -> None:
         if self.underMouse():
             self.timer.start(3000)
+            return
+        if self.confirming:
+            self._resolve(False)
             return
         s = self.suggestion
         self.suggestion = None

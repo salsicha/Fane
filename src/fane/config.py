@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -82,6 +84,24 @@ DEFAULTS: dict[str, Any] = {
         "timeout": 900,
         "cwd": "~",
     },
+    # Fane's own email: a Google account from Settings → Online Accounts.
+    "agent_mail": {
+        # The one account Fane may use. Empty = email off. Pick with `fane mail use`
+        # or the tray menu; Fane never falls back to another account.
+        "account": "",
+        "poll_seconds": 60,
+        # Mail from these addresses that passes Google's DMARC check is treated as a
+        # request from the user: Fane does it and replies automatically.
+        "trusted_senders": [],
+        "auto_reply_trusted": True,
+        "max_auto_replies_per_hour": 20,
+        # Let remote (emailed) requests look at the screen. Off: the reply could leak it.
+        "remote_can_see_screen": False,
+        # Tools withheld from emailed requests (nobody is at the desk to watch).
+        "remote_exclude_tools": ["insert_text", "insert_image", "delegate",
+                                 "fane_send_email", "fane_reply_email"],
+        "signature": "— Fane (assistant)",
+    },
     # MCP servers (stdio) whose tools are offered to the model, e.g.:
     # [mcp.servers.filesystem]
     # command = "npx"
@@ -116,6 +136,10 @@ binding = "<Control><Super>space"
 [connectors]
 notes_dirs = ["~/Notes", "~/Documents/Notes"]
 
+[agent_mail]
+# account = "my-assistant@gmail.com"     # must be in Settings → Online Accounts
+# trusted_senders = ["me@example.com"]   # their mail runs as requests, auto-replied
+
 # Expose MCP server tools to the assistant:
 # [mcp.servers.filesystem]
 # command = "npx"
@@ -148,6 +172,37 @@ class Config:
         with path.open("rb") as f:
             user = tomllib.load(f)
         return cls(_merge(DEFAULTS, user))
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(value)  # JSON strings and string lists are valid TOML
+
+
+def set_value(section: str, key: str, value: Any, path: Path = CONFIG_PATH) -> None:
+    """Set one key in the user's config.toml, keeping their comments and layout."""
+    if not path.exists():
+        Config.load(path)
+    lines = path.read_text().splitlines()
+    line = f"{key} = {_toml_value(value)}"
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == f"[{section}]"), None)
+    if start is None:
+        lines += ["", f"[{section}]", line]
+    else:
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+                   len(lines))
+        key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        hit = next((i for i in range(start + 1, end) if key_re.match(lines[i])), None)
+        if hit is None:
+            lines.insert(start + 1, line)
+        else:
+            lines[hit] = line
+    text = "\n".join(lines) + "\n"
+    tomllib.loads(text)  # never write a config we can't read back
+    path.write_text(text)
 
 
 def expand(path: str) -> Path:
