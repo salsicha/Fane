@@ -28,7 +28,7 @@ Requirements: Ubuntu 24.04+ / GNOME 45+, Python 3.12, [uv](https://docs.astral.s
 and Ollama.
 
 ```bash
-ollama pull gemma4:31b        # or one of the other recommended models below
+ollama pull openbmb/minicpm-v4.7:35b-a3b   # or one of the other recommended models below
 sudo apt install libxcb-cursor0
 git clone git@github.com:salsicha/Fane.git && cd Fane
 uv tool install -e .          # puts `fane` on your PATH
@@ -93,22 +93,22 @@ Gmail.
 
 | Model | Ollama tag | Size (Q4) | Architecture | Tool calling |
 | --- | --- | --- | --- | --- |
+| MiniCPM-V 4.7 35B (default) | `openbmb/minicpm-v4.7:35b-a3b` | ~22 GB | MoE, 3B active | JSON protocol* |
 | Gemma 4 31B | `gemma4:31b` | ~20 GB | dense | native |
 | Qwen 3.8 27B | `qwen3.8:27b` | ~18 GB | dense, thinking (Fane turns thinking off) | native |
-| MiniCPM-V 4.7 35B | `openbmb/minicpm-v4.7:35b-a3b` | ~22 GB | MoE, 3B active | JSON protocol* |
 
 \* Ollama doesn't list tool support for MiniCPM-V 4.7, so Fane detects this and switches to
 asking for a JSON action instead. You can force either convention with `[model] tool_mode`.
 
 These models are newer than older Ollama releases, so if a pull or load fails, update Ollama
-first. Gemma 4 is the default, and Fane
+first. MiniCPM-V 4.7 is the default because it scored best in `fane eval`, and Fane
 falls back through the list in order to whichever one you have installed. On a GPU with
 less than ~24 GB of memory, part of each model runs on the CPU. The dense models slow down
 the most when that happens, while MiniCPM's mixture-of-experts design only activates 3B
 parameters per token, so it should hold up better. The
 [evaluation](#evaluating-models) measures all of this on your hardware.
 
-You can use one model for the agent and a faster one for the background suggestions:
+You can use a different model for the agent and keep MiniCPM for the background suggestions:
 
 ```toml
 [model]
@@ -125,7 +125,7 @@ swaps between them, which costs a reload every time.
 synthetic screenshots and mock connectors, and then scores the results:
 
 ```bash
-ollama pull gemma4:31b && ollama pull qwen3.8:27b && ollama pull openbmb/minicpm-v4.7:35b-a3b
+ollama pull openbmb/minicpm-v4.7:35b-a3b && ollama pull gemma4:31b && ollama pull qwen3.8:27b
 fane pause                     # if Fane is running, so it doesn't compete for the GPU
 fane eval                      # all three recommended models
 fane eval --models qwen3.8:27b --only agent --repeat 3
@@ -152,7 +152,7 @@ listed in [`src/fane/config.py`](src/fane/config.py). The main ones:
 
 ```toml
 [model]
-name = "gemma4:31b"              # falls back to the other recommended/installed models
+name = "openbmb/minicpm-v4.7:35b-a3b"   # falls back to the other recommended/installed models
 suggest_name = ""                # optional faster model for proactive suggestions
 num_ctx = 8192                   # keeps more of the model on the GPU
 

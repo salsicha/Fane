@@ -18,9 +18,9 @@ SOCKET_PATH = RUNTIME_DIR / "fane.sock"
 
 # Recommended local vision models (Ollama tags), in default preference order.
 RECOMMENDED_MODELS = [
+    "openbmb/minicpm-v4.7:35b-a3b",     # MiniCPM-V 4.7 35B MoE (3B active), JSON tool calls
     "gemma4:31b",                       # Gemma 4 31B, dense, native tools
     "qwen3.8:27b",                      # Qwen 3.8 27B, dense, native tools
-    "openbmb/minicpm-v4.7:35b-a3b",     # MiniCPM-V 4.7 35B MoE (3B active), JSON tool calls
 ]
 
 DEFAULTS: dict[str, Any] = {
@@ -29,8 +29,8 @@ DEFAULTS: dict[str, Any] = {
         # Vision-language model served by Ollama. If it isn't installed, the first
         # installed model from `fallbacks` is used instead. The three recommended
         # models are compared by `fane eval`.
-        "name": "gemma4:31b",
-        "fallbacks": [*RECOMMENDED_MODELS, "gemma4", "qwen3.8", "minicpm-v4.7",
+        "name": "openbmb/minicpm-v4.7:35b-a3b",
+        "fallbacks": [*RECOMMENDED_MODELS, "minicpm-v4.7", "gemma4", "qwen3.8",
                       "qwen3-vl", "minicpm-v", "qwen2.5vl", "llava"],
         # Optional different (e.g. faster) model just for proactive suggestions.
         # Note: two models only stay loaded together if both fit in memory.
@@ -114,10 +114,10 @@ DEFAULT_TEMPLATE = """\
 # (see src/fane/config.py for the full list).
 
 [model]
-# Recommended: "gemma4:31b", "qwen3.8:27b", "openbmb/minicpm-v4.7:35b-a3b".
+# Recommended: "openbmb/minicpm-v4.7:35b-a3b", "gemma4:31b", "qwen3.8:27b".
 # Compare them on this machine with `fane eval`.
-name = "gemma4:31b"
-# suggest_name = "openbmb/minicpm-v4.7:35b-a3b"   # optional separate model for suggestions
+name = "openbmb/minicpm-v4.7:35b-a3b"
+# suggest_name = ""   # optional separate model for suggestions
 host = "http://127.0.0.1:11434"
 
 [suggestions]
