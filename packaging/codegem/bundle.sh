@@ -48,8 +48,15 @@ else
     site="$out/python/lib/python$py/site-packages"
 fi
 
-"$uv" pip install --no-cache --target "$site" --python-platform "$target" --python-version "$py" \
-    "superqode==$superqode_version"
+# Prebuilt wheels only: the bundle is assembled for another platform, so nothing can be compiled.
+constraints=()
+if [ "$platform" = macos-x86_64 ]; then
+    # cryptography 49+ ships no Intel-Mac wheels.
+    printf 'cryptography<49\n' > "$work/constraints.txt"
+    constraints=(--constraint "$work/constraints.txt")
+fi
+"$uv" pip install --no-cache --only-binary :all: --target "$site" --python-platform "$target" \
+    --python-version "$py" "${constraints[@]}" "superqode==$superqode_version"
 
 # Headers, docs, tests and caches aren't needed to run.
 rm -rf "$out/python/include" "$out/python/share" "$out/python/lib/python$py/test" \
