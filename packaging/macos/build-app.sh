@@ -43,5 +43,5 @@ rm -f "$dmg"
 staging=$(mktemp -d)
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname Fane -srcfolder "$staging" -ov -format UDZO "$dmg"
+hdiutil create -volname Fane -srcfolder "$staging" -ov -format ULMO "$dmg"  # LZMA: much smaller than UDZO
 echo "built $dmg"
