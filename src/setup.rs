@@ -288,18 +288,31 @@ async fn start_ollama(host: &str, progress: Progress<'_>) -> Result<(), String> 
     progress("Starting Ollama…");
     let bin = ollama_binary().ok_or("Ollama isn't installed")?;
     spawn_server(&bin);
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(60) {
-        if version(host).await.is_some() {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    if wait_for(host, Duration::from_secs(20)).await {
+        return Ok(());
+    }
+    // The desktop app can sit on a first-run dialog before it starts its server; run the
+    // server directly instead.
+    serve(&bin);
+    if wait_for(host, Duration::from_secs(40)).await {
+        return Ok(());
     }
     Err(format!("Ollama didn't start answering at {host}"))
 }
 
+async fn wait_for(host: &str, limit: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < limit {
+        if version(host).await.is_some() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
 fn spawn_server(bin: &Path) {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     // The desktop apps run the server themselves (and keep it running at login).
     if cfg!(target_os = "macos")
         && let Some(app) = bin.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"))
@@ -318,12 +331,24 @@ fn spawn_server(bin: &Path) {
     {
         return;
     }
+    serve(bin);
+}
+
+/// Run `ollama serve` in the background, detached from Fane.
+fn serve(bin: &Path) {
+    use std::process::{Command, Stdio};
     let mut cmd = Command::new(bin);
     cmd.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let _ = cmd.spawn();
 }
