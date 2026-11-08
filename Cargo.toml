@@ -1,0 +1,68 @@
+[package]
+name = "fane"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "0.2.32"
+anyhow = "1.0.104"
+arboard = { version = "3.7.0", features = ["image-data"] }
+async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
+async-trait = "0.1.92"
+auto-launch = "0.6.0"
+base64 = "0.23.1"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+dirs = "7.0.0"
+dns-lookup = "4.0.2"
+egui = "0.37.0"
+egui-winit = "0.37.0"
+egui_commonmark = "0.26.0"
+egui_glow = "0.37.0"
+futures = "0.3.34"
+glutin = "0.32.3"
+glutin-winit = "0.5.0"
+if-addrs = "0.15.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
+interprocess = { version = "2.4.7", features = ["tokio"] }
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder", "hostname"] }
+mail-parser = "1.0.1"
+open = "5.4.5"
+rand = "0.10.3"
+raw-window-handle = "0.6.2"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+rmcp = { version = "3.9.0", features = ["client", "transport-child-process"] }
+rustls = "0.23.46"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "process", "fs", "time", "sync", "net", "io-util", "signal"] }
+tokio-rustls = "0.26.6"
+toml = "1.2.1"
+toml_edit = "0.25.19"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+walkdir = "2.5.0"
+webpki-roots = "1.0.11"
+which = "8.0.6"
+winit = "0.30.13"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+active-win-pos-rs = "0.11.0"
+enigo = "0.6.1"
+global-hotkey = "0.9.0"
+tray-icon = "0.26.1"
+xcap = "0.9.8"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.14.0", default-features = false, features = ["tokio", "screenshot"] }
+ksni = "0.3.7"
+libc = "0.2.191"
+zbus = { version = "6.2.1", default-features = false, features = ["tokio"] }
