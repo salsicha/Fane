@@ -4,7 +4,6 @@
 //! Authentication-Results header (added by mx.google.com on delivery) must show a DMARC
 //! pass for the sender's domain. Only the owner's address is ever trusted.
 // Not yet reachable from main until the integrator wires the mailbox in.
-#![allow(dead_code)]
 
 use std::sync::LazyLock;
 
@@ -27,7 +26,8 @@ pub fn dmarc_pass(msg: &MailMessage) -> bool {
     if domain.is_empty() {
         return false;
     }
-    let header_from = Regex::new(&format!(r"(?i)\bheader\.from={}(?:[\s;)]|$)", regex::escape(&domain))).expect("escaped regex");
+    let header_from =
+        Regex::new(&format!(r"(?i)\bheader\.from={}(?:[\s;)]|$)", regex::escape(&domain))).expect("escaped regex");
     RE_DMARC_PASS.is_match(ar) && header_from.is_match(ar)
 }
 

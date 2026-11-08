@@ -22,6 +22,19 @@ pub fn card() -> egui::Frame {
         .inner_margin(Margin { left: 16, right: 12, top: 10, bottom: 12 })
 }
 
+/// egui's bundled fonts lack some symbols Fane uses (✦ → ✓ ✗); DejaVu Sans covers them.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "dejavu".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/DejaVuSans.ttf"))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(family).or_default().push("dejavu".into());
+    }
+    ctx.set_fonts(fonts);
+}
+
 /// Dark visuals tuned for the cards (the settings window uses the system theme instead).
 pub fn apply_card_style(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
@@ -74,8 +87,13 @@ pub fn primary(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let hovered_id = ui.next_auto_id();
     let hovered = ui.ctx().read_response(hovered_id).is_some_and(|r| r.hovered());
     let fill = if hovered { ACCENT_HOVER } else { ACCENT };
-    ui.add(egui::Button::new(RichText::new(label).color(Color32::from_rgb(0x11, 0x11, 0x11)).strong().font(FontId::proportional(12.5))).fill(fill))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    ui.add(
+        egui::Button::new(
+            RichText::new(label).color(Color32::from_rgb(0x11, 0x11, 0x11)).strong().font(FontId::proportional(12.5)),
+        )
+        .fill(fill),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 pub fn close_button(ui: &mut egui::Ui) -> egui::Response {

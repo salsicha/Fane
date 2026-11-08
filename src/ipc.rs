@@ -3,8 +3,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 
-use interprocess::local_socket::{prelude::*, ListenerOptions, Name, Stream};
-use serde_json::{json, Value};
+use interprocess::local_socket::{ListenerOptions, Name, Stream, prelude::*};
+use serde_json::{Value, json};
 
 use crate::config::RUNTIME_DIR;
 
@@ -50,7 +50,7 @@ where
     F: Fn(Value) -> Fut + Send + Sync + Clone + 'static,
     Fut: std::future::Future<Output = Value> + Send,
 {
-    use interprocess::local_socket::tokio::{prelude::*, Stream as TokioStream};
+    use interprocess::local_socket::tokio::{Stream as TokioStream, prelude::*};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     #[cfg(unix)]

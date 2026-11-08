@@ -10,8 +10,8 @@ mod style;
 mod tray;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
@@ -210,6 +210,7 @@ impl App {
         match GlWindow::new(event_loop, config, Self::attrs(kind)) {
             Ok(win) => {
                 let ctx = win.egui.egui_ctx.clone();
+                style::install_fonts(&ctx);
                 if kind == WindowKind::Settings {
                     egui_extras_theme(&ctx);
                 } else {
@@ -250,12 +251,16 @@ impl App {
     }
 
     fn update_busy(&self) {
-        let busy = self.visible.contains(&WindowKind::Palette) || self.overlay.has_suggestion() || self.overlay.confirming();
+        let busy =
+            self.visible.contains(&WindowKind::Palette) || self.overlay.has_suggestion() || self.overlay.confirming();
         self.core.busy.store(busy, Ordering::SeqCst);
     }
 
     /// (origin, size, scale) of the monitor the windows should appear on.
-    fn monitor(&self, event_loop: &ActiveEventLoop) -> Option<(PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>, f64)> {
+    fn monitor(
+        &self,
+        event_loop: &ActiveEventLoop,
+    ) -> Option<(PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>, f64)> {
         let m = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next())?;
         Some((m.position(), m.size(), m.scale_factor()))
     }
@@ -291,7 +296,14 @@ impl App {
     }
 
     // --- palette ------------------------------------------------------------------------
-    fn show_palette(&mut self, event_loop: &ActiveEventLoop, snap: crate::snapshot::Snapshot, prefill: &str, submit: bool, answer: Option<String>) {
+    fn show_palette(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        snap: crate::snapshot::Snapshot,
+        prefill: &str,
+        submit: bool,
+        answer: Option<String>,
+    ) {
         if !self.ensure_window(event_loop, WindowKind::Palette) {
             self.core.busy.store(false, Ordering::SeqCst);
             return;
@@ -304,10 +316,8 @@ impl App {
         }
         if let Some(a) = answer {
             self.palette.show_answer(&a, false);
-        } else if submit {
-            if let Some(text) = self.palette.submit() {
-                self.palette_submit(text);
-            }
+        } else if submit && let Some(text) = self.palette.submit() {
+            self.palette_submit(text);
         }
     }
 
@@ -523,14 +533,14 @@ impl App {
     }
 
     fn tick_overlay(&mut self) {
-        if let Some(deadline) = self.overlay.deadline {
-            if Instant::now() >= deadline {
-                self.overlay.deadline = None;
-                if let Some(a) = self.overlay.expire() {
-                    self.on_overlay_action(a);
-                }
-                self.redraw(WindowKind::Overlay);
+        if let Some(deadline) = self.overlay.deadline
+            && Instant::now() >= deadline
+        {
+            self.overlay.deadline = None;
+            if let Some(a) = self.overlay.expire() {
+                self.on_overlay_action(a);
             }
+            self.redraw(WindowKind::Overlay);
         }
         if self.overlay.tick() {
             self.set_visible(WindowKind::Overlay, false);
@@ -571,7 +581,10 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::JobStatus(job, text) => {
                 let origin = self.jobs.get(&job).map(|j| j.0).unwrap_or(Origin::Overlay);
-                if origin == Origin::Palette && self.visible.contains(&WindowKind::Palette) && self.palette.job == Some(job) {
+                if origin == Origin::Palette
+                    && self.visible.contains(&WindowKind::Palette)
+                    && self.palette.job == Some(job)
+                {
                     self.palette.set_status(&text);
                     self.redraw(WindowKind::Palette);
                 } else {
@@ -583,10 +596,17 @@ impl ApplicationHandler<UiEvent> for App {
                 let (origin, title) = self.jobs.remove(&job).unwrap_or((Origin::Overlay, String::new()));
                 let text = error.clone().unwrap_or_else(|| result.as_ref().map(|r| r.text.clone()).unwrap_or_default());
                 if result.as_ref().is_some_and(|r| r.inserted) {
-                    let note = if !text.is_empty() && text.chars().count() < 80 { format!("Inserted ✓ — {text}") } else { "Inserted ✓".into() };
+                    let note = if !text.is_empty() && text.chars().count() < 80 {
+                        format!("Inserted ✓ — {text}")
+                    } else {
+                        "Inserted ✓".into()
+                    };
                     self.toast(event_loop, &note, 4);
                     self.show_overlay(event_loop);
-                } else if origin == Origin::Palette && self.visible.contains(&WindowKind::Palette) && self.palette.job == Some(job) {
+                } else if origin == Origin::Palette
+                    && self.visible.contains(&WindowKind::Palette)
+                    && self.palette.job == Some(job)
+                {
                     self.palette.show_answer(&text, error.is_some());
                     self.redraw(WindowKind::Palette);
                 } else {
@@ -621,7 +641,9 @@ impl ApplicationHandler<UiEvent> for App {
                 self.show_overlay(event_loop);
             }
             UiEvent::Quit => self.quit(event_loop),
-            UiEvent::PaletteReady { snap, prefill, submit, answer } => self.show_palette(event_loop, *snap, &prefill, submit, answer),
+            UiEvent::PaletteReady { snap, prefill, submit, answer } => {
+                self.show_palette(event_loop, *snap, &prefill, submit, answer)
+            }
             UiEvent::Servers(r) => {
                 self.settings.show_servers(r);
                 self.redraw(WindowKind::Settings);

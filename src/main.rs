@@ -24,7 +24,9 @@ fn main() {
         // A GUI-subsystem exe has no console; borrow the terminal we were started from.
         // SAFETY: plain Win32 call with a constant argument.
         unsafe {
-            windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
         }
     }
     // Several dependencies bring rustls; pick one crypto provider for the whole process.

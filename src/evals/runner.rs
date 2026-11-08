@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::agent::{Agent, ToolModes};
 use crate::config::{Config, RECOMMENDED_MODELS, STATE_DIR};
-use crate::evals::scenarios::{agent_tasks, AgentTask, Delegation, Mocks, SuggestCase, SUGGEST_CASES};
+use crate::evals::scenarios::{AgentTask, Delegation, Mocks, SUGGEST_CASES, SuggestCase, agent_tasks};
 use crate::evals::scenes::{scene, scenes};
-use crate::llm::{find_installed, truncate, LlmResult, Ollama};
+use crate::llm::{LlmResult, Ollama, find_installed, truncate};
 use crate::snapshot::{Snapshot, WindowInfo};
 use crate::suggester::Suggester;
 
@@ -114,7 +114,11 @@ fn py_list_repr(items: &[&str]) -> String {
         .iter()
         .map(|s| {
             let s = s.replace('\\', "\\\\");
-            if s.contains('\'') && !s.contains('"') { format!("\"{s}\"") } else { format!("'{}'", s.replace('\'', "\\'")) }
+            if s.contains('\'') && !s.contains('"') {
+                format!("\"{s}\"")
+            } else {
+                format!("'{}'", s.replace('\'', "\\'"))
+            }
         })
         .collect();
     format!("[{}]", reprs.join(", "))
@@ -417,7 +421,8 @@ impl EvalRunner {
     async fn suggest_case(&self, llm: &Arc<Ollama>, case: &SuggestCase) -> SuggestRecord {
         let snap = snap(case.scene);
         let sug = Suggester::new(llm.clone(), self.cfg.suggestions.clone(), self.cfg.model.max_image_side);
-        let mut rec = SuggestRecord { case: case.scene.into(), expect: case.expect.map(String::from), ..Default::default() };
+        let mut rec =
+            SuggestRecord { case: case.scene.into(), expect: case.expect.map(String::from), ..Default::default() };
         let t0 = Instant::now();
         let (activity, raw) = match tokio::time::timeout(self.timeout, sug.propose(&snap)).await {
             Ok(Ok(found)) => {
@@ -493,7 +498,8 @@ impl EvalRunner {
         rec.llm_thinking_chars = Some(after.thinking_chars.saturating_sub(before.thinking_chars));
         rec.mode = Some(result.mode.clone());
         rec.answer = Some(result.text.clone());
-        rec.calls = Some(result.calls.iter().map(|c| CallRecord { name: c.name.clone(), args: c.args.clone() }).collect());
+        rec.calls =
+            Some(result.calls.iter().map(|c| CallRecord { name: c.name.clone(), args: c.args.clone() }).collect());
         rec.inserted = Some(mocks.inserted());
         rec.delegated = Some(mocks.delegated());
         rec.checks = Checks(task.checks.iter().map(|(k, f)| (k.to_string(), f(&result, &mocks))).collect());
@@ -597,7 +603,9 @@ pub fn summarize(r: &ModelReport) -> Summary {
         suggest_latency_s: median_f(&sug.iter().filter(|s| s.json_ok).map(|s| s.latency_s).collect::<Vec<_>>()),
         agent_latency_s: median_f(&ok_agents().map(|a| a.latency_s).collect::<Vec<_>>()),
         tok_s: (!speeds.is_empty()).then(|| round_to(speeds.iter().sum::<f64>() / speeds.len() as f64, 1)),
-        tool_calls: median_i(&r.agent.iter().filter_map(|a| a.calls.as_ref().map(|c| c.len() as i64)).collect::<Vec<_>>()),
+        tool_calls: median_i(
+            &r.agent.iter().filter_map(|a| a.calls.as_ref().map(|c| c.len() as i64)).collect::<Vec<_>>(),
+        ),
         agent_tokens: median_i(&r.agent.iter().filter_map(|a| a.llm_eval_count.map(|n| n as i64)).collect::<Vec<_>>()),
         thinking_chars: median_i(
             &r.agent.iter().filter_map(|a| a.llm_thinking_chars.map(|n| n as i64)).collect::<Vec<_>>(),
@@ -783,7 +791,8 @@ pub fn to_markdown(res: &EvalResults) -> String {
                 if recs.is_empty() {
                     return "–".into();
                 }
-                let cell: Vec<String> = recs.iter().map(|r| format!("{}/{}", r.checks.passed(), r.checks.0.len())).collect();
+                let cell: Vec<String> =
+                    recs.iter().map(|r| format!("{}/{}", r.checks.passed(), r.checks.0.len())).collect();
                 let lat = median_f(&recs.iter().map(|r| r.latency_s).collect::<Vec<_>>());
                 format!("{} · {}s", cell.join(" "), dash_f(lat))
             })
@@ -822,8 +831,11 @@ pub fn to_markdown(res: &EvalResults) -> String {
                 any_fail = true;
                 let failed: Vec<&str> = r.checks.0.iter().filter(|(_, v)| !v).map(|(k, _)| k.as_str()).collect();
                 let calls = r.calls.as_deref().unwrap_or_default();
-                let calls =
-                    if calls.is_empty() { "none".into() } else { calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ") };
+                let calls = if calls.is_empty() {
+                    "none".into()
+                } else {
+                    calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                };
                 let answer = r.answer.as_deref().filter(|a| !a.is_empty()).or(r.error.as_deref()).unwrap_or("");
                 lines.push(format!(
                     "- **{}** agent `{}`: failed {} · tools: {calls} · answer: “{}”",
@@ -867,11 +879,15 @@ pub fn list_cases() -> Vec<String> {
 
 /// Run the suite, print progress and the report, save results; returns the exit code.
 pub async fn run(cfg: Config, opts: EvalOptions) -> anyhow::Result<i32> {
-    let models: Vec<String> =
-        if opts.models.is_empty() { RECOMMENDED_MODELS.iter().map(|s| s.to_string()).collect() } else { opts.models.clone() };
-    let out = opts.out.clone().unwrap_or_else(|| {
-        STATE_DIR.join("evals").join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string())
-    });
+    let models: Vec<String> = if opts.models.is_empty() {
+        RECOMMENDED_MODELS.iter().map(|s| s.to_string()).collect()
+    } else {
+        opts.models.clone()
+    };
+    let out = opts
+        .out
+        .clone()
+        .unwrap_or_else(|| STATE_DIR.join("evals").join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()));
     let runner = EvalRunner::new(cfg, &opts);
     let res = runner.run(&models).await;
     let report = save(&res, &out)?;
@@ -944,7 +960,10 @@ mod tests {
                 sug("idle", Some("quiet"), false, Some(false), 6.0),
                 sug("article", None, true, None, 5.0),
             ],
-            vec![agent("reply_insert", &[true, true, false], 10.0, 1, 100), agent("screen_read", &[true, true, true], 20.0, 2, 300)],
+            vec![
+                agent("reply_insert", &[true, true, false], 10.0, 1, 100),
+                agent("screen_read", &[true, true, true], 20.0, 2, 300),
+            ],
         );
         let b = model(
             "small:4b",
@@ -1014,7 +1033,9 @@ mod tests {
             models,
         };
         let md = to_markdown(&res);
-        assert!(md.starts_with("# Fane model eval — 2026-11-07T14:05:00\n\nMachine: NVIDIA RTX 5090, 32607 MiB, 64 GB RAM"));
+        assert!(
+            md.starts_with("# Fane model eval — 2026-11-07T14:05:00\n\nMachine: NVIDIA RTX 5090, 32607 MiB, 64 GB RAM")
+        );
         assert!(md.contains("image ≤1280px · repeat ×1 · took 12 min"));
         assert!(md.contains("- **nope:1b**: missing — not installed — run: ollama pull nope:1b"));
         assert!(md.contains("## Summary\n\n| | big:31b | small:4b |\n|---|---|---|\n"));
@@ -1028,7 +1049,9 @@ mod tests {
         assert!(md.contains("| suggest: code | – | – |"));
         assert!(md.contains("| agent: reply_insert | 2/3 · 10.0s | 0/3 · 3.0s |"));
         assert!(md.contains("## Failures"));
-        assert!(md.contains("- **big:31b** suggest `idle`: activity “looking at idle” · suggestions: Do a thing (0.9)"));
+        assert!(
+            md.contains("- **big:31b** suggest `idle`: activity “looking at idle” · suggestions: Do a thing (0.9)")
+        );
         assert!(md.contains(
             "- **small:4b** agent `reply_insert`: failed ['check 0', 'check 1', 'check 2'] · tools: none · answer: “done”"
         ));

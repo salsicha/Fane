@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::SuggestionsCfg;
-use crate::llm::{encode_image, LlmResult, Ollama};
-use crate::snapshot::{change_ratio, Snapshot};
+use crate::llm::{LlmResult, Ollama, encode_image};
+use crate::snapshot::{Snapshot, change_ratio};
 
 fn schema() -> Value {
     json!({
@@ -216,6 +216,7 @@ pub fn similarity(a: &str, b: &str) -> f64 {
 }
 
 /// Total size of the matching blocks found by recursively taking the longest common run.
+#[allow(clippy::needless_range_loop)]
 fn matching(a: &[char], b: &[char]) -> usize {
     let (mut best, mut best_i, mut best_j) = (0, 0, 0);
     let mut prev = vec![0usize; b.len() + 1];

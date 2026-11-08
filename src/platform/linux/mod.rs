@@ -305,9 +305,7 @@ fn probe_helper_blocking() -> bool {
 }
 
 fn is_gnome() -> bool {
-    std::env::var("XDG_CURRENT_DESKTOP")
-        .map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("gnome")))
-        .unwrap_or(false)
+    std::env::var("XDG_CURRENT_DESKTOP").map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("gnome"))).unwrap_or(false)
 }
 
 fn make_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -429,8 +427,10 @@ mod tests {
 
     #[test]
     fn xprop_parsing() {
-        assert_eq!(parse_active_window_id("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x3a00007\n").as_deref(),
-                   Some("0x3a00007"));
+        assert_eq!(
+            parse_active_window_id("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x3a00007\n").as_deref(),
+            Some("0x3a00007")
+        );
         assert_eq!(parse_active_window_id("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x0\n"), None);
         let props = "_NET_WM_NAME(UTF8_STRING) = \"notes.txt - gedit\"\n\
                      WM_CLASS(STRING) = \"gedit\", \"Gedit\"\n\
@@ -448,7 +448,10 @@ mod tests {
                    garbage\n";
         let wins = parse_wmctrl(out);
         assert_eq!(wins.len(), 2);
-        assert_eq!((wins[0].title.as_str(), wins[0].app.as_str(), wins[0].pid), ("notes.txt - gedit", "gedit.Gedit", 4242));
+        assert_eq!(
+            (wins[0].title.as_str(), wins[0].app.as_str(), wins[0].pid),
+            ("notes.txt - gedit", "gedit.Gedit", 4242)
+        );
         assert_eq!((wins[1].title.as_str(), wins[1].pid), ("Home", 99));
     }
 

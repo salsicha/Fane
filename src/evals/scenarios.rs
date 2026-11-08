@@ -7,11 +7,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use regex::Regex;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::agent::AgentResult;
-use crate::connectors::builtin::{builtin_tools, Handlers};
-use crate::tools::{handler, params, Args, Tool, ToolRegistry};
+use crate::connectors::builtin::{Handlers, builtin_tools};
+use crate::tools::{Args, Tool, ToolRegistry, handler, params};
 
 // --- proactive suggestions ----------------------------------------------------------
 
@@ -167,8 +167,12 @@ impl Mocks {
                 let hits: Vec<Value> = msgs
                     .iter()
                     .filter(|m| {
-                        let hay = format!("{}{}{}", m["from"].as_str().unwrap_or(""), m["subject"].as_str().unwrap_or(""),
-                                          m["body"].as_str().unwrap_or(""))
+                        let hay = format!(
+                            "{}{}{}",
+                            m["from"].as_str().unwrap_or(""),
+                            m["subject"].as_str().unwrap_or(""),
+                            m["body"].as_str().unwrap_or("")
+                        )
                         .to_lowercase();
                         q.split_whitespace().any(|w| hay.contains(w))
                     })
@@ -300,8 +304,15 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                 ("opens the note", called("read_note")),
                 (
                     "≥3 of 4 facts from the note",
-                    facts(3, &[&["mobile beta", "august"], &["two engineers", "2 engineers", "hire"],
-                               &["40k", "40,000", "$40"], &["billing"]]),
+                    facts(
+                        3,
+                        &[
+                            &["mobile beta", "august"],
+                            &["two engineers", "2 engineers", "hire"],
+                            &["40k", "40,000", "$40"],
+                            &["billing"],
+                        ],
+                    ),
                 ),
             ],
         },
@@ -351,10 +362,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
             checks: vec![
                 ("calls the calendar tool", called("calendar__todays_events")),
                 ("answer: busy (design review)", check(|r, _| BUSY.is_match(&r.text))),
-                (
-                    "doesn't insert or delegate",
-                    check(|_, m| m.inserted().is_empty() && m.delegated().is_empty()),
-                ),
+                ("doesn't insert or delegate", check(|_, m| m.inserted().is_empty() && m.delegated().is_empty())),
             ],
         },
     ]

@@ -13,8 +13,14 @@ pub fn rgba(size: u32) -> RgbaImage {
     let c = (32.0 * k) as i32;
     draw_filled_circle_mut(&mut img, (c, c), (30.0 * k) as i32, Rgba([0x20, 0x21, 0x26, 255]));
     let pts = [
-        (32.0, 12.0), (36.5, 27.5), (52.0, 32.0), (36.5, 36.5),
-        (32.0, 52.0), (27.5, 36.5), (12.0, 32.0), (27.5, 27.5),
+        (32.0, 12.0),
+        (36.5, 27.5),
+        (52.0, 32.0),
+        (36.5, 36.5),
+        (32.0, 52.0),
+        (27.5, 36.5),
+        (12.0, 32.0),
+        (27.5, 27.5),
     ];
     let poly: Vec<Point<i32>> = pts.iter().map(|(x, y)| Point::new((x * k) as i32, (y * k) as i32)).collect();
     draw_polygon_mut(&mut img, &poly, Rgba([0x8a, 0xb4, 0xf8, 255]));

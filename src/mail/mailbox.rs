@@ -4,7 +4,6 @@
 //! and answered. Everything else is ignored: never shown to the model, no card, no
 //! notification.
 // Not yet reachable from main until the integrator wires the mailbox in.
-#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -16,7 +15,9 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use super::accounts::OnlineAccounts;
-use super::gmail::{GmailClient, MailClient, MailError, MailMessage, TokenFn, build_message, strip_quoted, truncate_chars};
+use super::gmail::{
+    GmailClient, MailClient, MailError, MailMessage, TokenFn, build_message, strip_quoted, truncate_chars,
+};
 use super::trust::verified_owner;
 use crate::config::{AgentMailCfg, STATE_DIR};
 use crate::tools::{Args, Tool, handler, params, prop};
@@ -77,7 +78,12 @@ pub struct AgentMailbox {
 impl AgentMailbox {
     /// A mailbox over any client, not yet polling. Call [`AgentMailbox::init_state`] (or let
     /// [`AgentMailbox::connect`] do it) before polling.
-    pub fn new(client: Arc<dyn MailClient>, cfg: AgentMailCfg, host: Arc<dyn MailHost>, state_path: PathBuf) -> Arc<Self> {
+    pub fn new(
+        client: Arc<dyn MailClient>,
+        cfg: AgentMailCfg,
+        host: Arc<dyn MailHost>,
+        state_path: PathBuf,
+    ) -> Arc<Self> {
         Arc::new(Self {
             address: client.address().to_string(),
             client,
@@ -127,9 +133,8 @@ impl AgentMailbox {
     /// mail arriving from now on is handled.
     pub async fn init_state(&self) -> Result<(), MailError> {
         let mut state = self.state.lock().await;
-        let saved = std::fs::read_to_string(&self.state_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<PollState>(&s).ok());
+        let saved =
+            std::fs::read_to_string(&self.state_path).ok().and_then(|s| serde_json::from_str::<PollState>(&s).ok());
         *state = match saved {
             Some(saved) => saved,
             None => {
@@ -181,6 +186,7 @@ impl AgentMailbox {
 
     /// Apply edited settings (owner, signature, limits). The poll interval takes effect on
     /// the next [`AgentMailbox::start`].
+    #[allow(dead_code)]
     pub fn set_cfg(&self, cfg: AgentMailCfg) {
         *self.cfg.lock().unwrap() = cfg;
     }
@@ -374,18 +380,19 @@ impl AgentMailbox {
     pub fn tools(self: &Arc<Self>) -> Vec<Tool> {
         let me = self.address.clone();
         let weak = Arc::downgrade(self);
-        let tool_handler = |f: fn(Arc<AgentMailbox>, Args) -> futures::future::BoxFuture<'static, anyhow::Result<Value>>| {
-            let weak: Weak<AgentMailbox> = weak.clone();
-            handler(move |args: Args| {
-                let mailbox = weak.upgrade();
-                async move {
-                    match mailbox {
-                        Some(mb) => f(mb, args).await,
-                        None => Ok(json!("error: email is off")),
+        let tool_handler =
+            |f: fn(Arc<AgentMailbox>, Args) -> futures::future::BoxFuture<'static, anyhow::Result<Value>>| {
+                let weak: Weak<AgentMailbox> = weak.clone();
+                handler(move |args: Args| {
+                    let mailbox = weak.upgrade();
+                    async move {
+                        match mailbox {
+                            Some(mb) => f(mb, args).await,
+                            None => Ok(json!("error: email is off")),
+                        }
                     }
-                }
-            })
-        };
+                })
+            };
         vec![
             Tool::new(
                 "fane_inbox",
@@ -393,13 +400,18 @@ impl AgentMailbox {
                     "List the emails the user sent to YOUR OWN mailbox ({me}), newest first. Only the user's \
                      own verified messages are shown. This is Fane's account, not the user's mail."
                 ),
-                params(&[], &[
-                    ("limit", prop("integer", "")),
-                    ("query", prop("string", "Gmail search, e.g. subject:notes")),
-                    ("unread_only", prop("boolean", "")),
-                ]),
+                params(
+                    &[],
+                    &[
+                        ("limit", prop("integer", "")),
+                        ("query", prop("string", "Gmail search, e.g. subject:notes")),
+                        ("unread_only", prop("boolean", "")),
+                    ],
+                ),
                 tool_handler(|mb, a| {
-                    Box::pin(async move { Ok(mb.inbox_tool(a.int("limit", 10), &a.str("query"), a.bool("unread_only")).await?) })
+                    Box::pin(async move {
+                        Ok(mb.inbox_tool(a.int("limit", 10), &a.str("query"), a.bool("unread_only")).await?)
+                    })
                 }),
                 "Checking my inbox",
             ),
@@ -416,15 +428,21 @@ impl AgentMailbox {
                     "Send an email from your own address ({me}). The user confirms before it goes to anyone \
                      but themselves."
                 ),
-                params(&["to", "subject", "body"], &[
-                    ("to", prop("string", "Comma-separated addresses")),
-                    ("subject", prop("string", "")),
-                    ("body", prop("string", "Plain-text body, no signature")),
-                    ("cc", prop("string", "")),
-                ]),
+                params(
+                    &["to", "subject", "body"],
+                    &[
+                        ("to", prop("string", "Comma-separated addresses")),
+                        ("subject", prop("string", "")),
+                        ("body", prop("string", "Plain-text body, no signature")),
+                        ("cc", prop("string", "")),
+                    ],
+                ),
                 tool_handler(|mb, a| {
                     Box::pin(async move {
-                        Ok(json!(mb.send_checked(&a.list("to"), &a.str("subject"), &a.str("body"), &a.list("cc"), None).await))
+                        Ok(json!(
+                            mb.send_checked(&a.list("to"), &a.str("subject"), &a.str("body"), &a.list("cc"), None)
+                                .await
+                        ))
                     })
                 }),
                 "Sending email",
@@ -433,7 +451,9 @@ impl AgentMailbox {
                 "fane_reply_email",
                 &format!("Reply to one of the user's emails in your own mailbox ({me})."),
                 params(&["uid", "body"], &[("uid", prop("integer", "")), ("body", prop("string", "Plain-text reply"))]),
-                tool_handler(|mb, a| Box::pin(async move { Ok(mb.reply_tool(a.int("uid", -1), &a.str("body")).await?) })),
+                tool_handler(|mb, a| {
+                    Box::pin(async move { Ok(mb.reply_tool(a.int("uid", -1), &a.str("body")).await?) })
+                }),
                 "Replying",
             ),
         ]
@@ -649,7 +669,9 @@ mod tests {
     async fn send_to_stranger_needs_confirmation() {
         let client = FakeClient::with(vec![]);
         let declined = mailbox(&client, &Arc::new(FakeHost::default()), cfg(), "declined");
-        let out = call(&declined, "fane_send_email", json!({"to": "dana@example.com", "subject": "Hi", "body": "Hello"})).await;
+        let out =
+            call(&declined, "fane_send_email", json!({"to": "dana@example.com", "subject": "Hi", "body": "Hello"}))
+                .await;
         assert_eq!(out, json!(DECLINED));
         assert!(client.sent().is_empty());
 
@@ -658,7 +680,10 @@ mod tests {
         let args = json!({"to": "dana@example.com", "cc": USER, "subject": "Hi", "body": "Hello"});
         assert_eq!(call(&approved, "fane_send_email", args).await, json!(format!("sent to dana@example.com, {USER}")));
         let asked = host.asked.lock().unwrap().clone();
-        assert_eq!(asked[0], json!({"from": ME, "to": ["dana@example.com"], "cc": [USER], "subject": "Hi", "body": "Hello"}));
+        assert_eq!(
+            asked[0],
+            json!({"from": ME, "to": ["dana@example.com"], "cc": [USER], "subject": "Hi", "body": "Hello"})
+        );
         let sent = client.sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].body, "Hello\n\n— Fane");
@@ -668,7 +693,9 @@ mod tests {
     async fn send_to_owner_needs_no_confirmation() {
         let (client, host) = (FakeClient::with(vec![]), Arc::new(FakeHost::default()));
         let mb = mailbox(&client, &host, cfg(), "toowner");
-        let out = call(&mb, "fane_send_email", json!({"to": "Salsicha@Gmail.com", "subject": "Done", "body": "Finished"})).await;
+        let out =
+            call(&mb, "fane_send_email", json!({"to": "Salsicha@Gmail.com", "subject": "Done", "body": "Finished"}))
+                .await;
         assert!(out.as_str().unwrap().starts_with("sent"), "{out}");
         assert!(host.asked.lock().unwrap().is_empty());
         assert_eq!(client.sent().len(), 1);

@@ -154,13 +154,20 @@ async fn probe_with(c: &reqwest::Client, url: &str) -> Result<OllamaServer, NotO
     let get = |path: &str| {
         let full = format!("{url}{path}");
         async move {
-            let r = c.get(&full).send().await.map_err(|e| NotOllama(format!("no Ollama answering at {url} ({})", kind(&e))))?;
+            let r = c
+                .get(&full)
+                .send()
+                .await
+                .map_err(|e| NotOllama(format!("no Ollama answering at {url} ({})", kind(&e))))?;
             let r = r.error_for_status().map_err(|_| NotOllama(format!("{url} answered, but it isn't Ollama")))?;
             r.json::<Value>().await.map_err(|_| NotOllama(format!("{url} answered, but it isn't Ollama")))
         }
     };
     let version = get("/api/version").await?;
-    let version = version["version"].as_str().ok_or_else(|| NotOllama(format!("{url} answered, but it isn't Ollama")))?.to_string();
+    let version = version["version"]
+        .as_str()
+        .ok_or_else(|| NotOllama(format!("{url} answered, but it isn't Ollama")))?
+        .to_string();
     let tags = get("/api/tags").await?;
     let models = tags["models"]
         .as_array()
@@ -239,10 +246,10 @@ pub async fn discover_on(extra: &[String], port: u16, timeout: Duration) -> Vec<
             };
             server.local = server.address().starts_with("127.");
             server.aliases = aliases.get(url).cloned().unwrap_or_default();
-            if !server.local {
-                if let Ok(ip) = server.address().parse::<IpAddr>() {
-                    server.name = hostname(ip).await;
-                }
+            if !server.local
+                && let Ok(ip) = server.address().parse::<IpAddr>()
+            {
+                server.name = hostname(ip).await;
             }
             Some(server)
         }
@@ -332,7 +339,8 @@ mod tests {
                 } else {
                     r#"{"models":[{"name":"gemma4:31b"},{"name":"llama3:8b"}]}"#.into()
                 };
-                let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let resp =
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 let _ = sock.write_all(resp.as_bytes()).await;
             }
         });

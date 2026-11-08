@@ -1,6 +1,6 @@
 //! Definitions of the built-in tools. Handlers are injected so evals can mock them.
 
-use crate::tools::{params, prop, Handler, Tool};
+use crate::tools::{Handler, Tool, params, prop};
 use serde_json::json;
 
 /// One async handler per built-in tool.
@@ -32,7 +32,13 @@ pub fn builtin_tools(h: Handlers, delegate_agents: &[String]) -> Vec<Tool> {
             h.insert_image,
             "Inserting image",
         ),
-        Tool::new("read_clipboard", "Read the current clipboard text.", params(&[], &[]), h.read_clipboard, "Reading clipboard"),
+        Tool::new(
+            "read_clipboard",
+            "Read the current clipboard text.",
+            params(&[], &[]),
+            h.read_clipboard,
+            "Reading clipboard",
+        ),
         Tool::new(
             "list_windows",
             "List the user's open windows/apps with titles.",

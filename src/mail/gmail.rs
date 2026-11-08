@@ -1,6 +1,5 @@
 //! Gmail over IMAP/SMTP with XOAUTH2, using tokens from GNOME Online Accounts.
 // Not yet reachable from main until the integrator wires the mailbox in.
-#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -181,7 +180,12 @@ pub fn parse_message(uid: u32, raw: &[u8], flags: &str) -> MailMessage {
 
     MailMessage {
         uid,
-        message_id: headers.all("Message-ID").next().and_then(|h| h.value().as_text()).map(bracketed).unwrap_or_default(),
+        message_id: headers
+            .all("Message-ID")
+            .next()
+            .and_then(|h| h.value().as_text())
+            .map(bracketed)
+            .unwrap_or_default(),
         from,
         from_addr,
         to: addresses("To"),
@@ -320,7 +324,11 @@ pub fn flags_text<'a>(flags: impl IntoIterator<Item = Flag<'a>>) -> String {
 
 /// One FETCH response item (UID, FLAGS, BODY[]) to a message. Items without a UID or body
 /// (e.g. unsolicited flag updates) are skipped.
-pub fn message_from_fetch<'a>(uid: Option<u32>, flags: impl IntoIterator<Item = Flag<'a>>, body: Option<&[u8]>) -> Option<MailMessage> {
+pub fn message_from_fetch<'a>(
+    uid: Option<u32>,
+    flags: impl IntoIterator<Item = Flag<'a>>,
+    body: Option<&[u8]>,
+) -> Option<MailMessage> {
     Some(parse_message(uid?, body?, &flags_text(flags)))
 }
 
@@ -633,7 +641,10 @@ pub(crate) mod tests {
 
     #[test]
     fn invalid_address_is_an_error() {
-        assert!(matches!(build_message(ME, &["not an address".into()], "s", "b", &[], None), Err(MailError::Message(_))));
+        assert!(matches!(
+            build_message(ME, &["not an address".into()], "s", "b", &[], None),
+            Err(MailError::Message(_))
+        ));
     }
 
     #[test]

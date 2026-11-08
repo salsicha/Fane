@@ -35,8 +35,7 @@ struct Mail {
 
 impl Mail {
     fn to_json(&self, include_body: bool) -> Value {
-        let body: String =
-            if include_body { self.body.clone() } else { self.body.chars().take(PREVIEW_MAX).collect() };
+        let body: String = if include_body { self.body.clone() } else { self.body.chars().take(PREVIEW_MAX).collect() };
         json!({"from": self.from, "to": self.to, "subject": self.subject, "date": self.date,
                "account": self.account, "body": body})
     }
@@ -117,7 +116,8 @@ fn read_tail(mbox: &Path) -> std::io::Result<Vec<Mail>> {
     f.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))?;
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
-    let account = mbox.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let account =
+        mbox.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     Ok(parse_mbox(&data, size > TAIL_BYTES, &account))
 }
 
@@ -146,7 +146,9 @@ fn parse_message(parser: &MessageParser, raw: &[u8], account: &str) -> Option<Ma
     // text/plain preferred, else HTML (tags are stripped below either way, like the original).
     let plain = msg.text_body().find(|p| matches!(p.kind(), PartKind::Text)).and_then(|p| p.text());
     let text = plain
-        .or_else(|| msg.html_body().chain(msg.text_body()).find(|p| matches!(p.kind(), PartKind::Html)).and_then(|p| p.text()))
+        .or_else(|| {
+            msg.html_body().chain(msg.text_body()).find(|p| matches!(p.kind(), PartKind::Html)).and_then(|p| p.text())
+        })
         .unwrap_or_default();
     let text = TAG.replace_all(&text, " ");
     let body: String = SPACE.replace_all(&text, " ").trim().chars().take(BODY_MAX).collect();

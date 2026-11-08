@@ -6,8 +6,8 @@ use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use base64::Engine;
-use image::{imageops::FilterType, DynamicImage};
-use serde_json::{json, Value};
+use image::{DynamicImage, imageops::FilterType};
+use serde_json::{Value, json};
 
 use crate::config::ModelCfg;
 
@@ -72,12 +72,11 @@ pub fn parse_json(text: &str) -> LlmResult<Value> {
     if let Ok(v) = serde_json::from_str(text) {
         return Ok(v);
     }
-    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
-        if end > start {
-            if let Ok(v) = serde_json::from_str(&text[start..=end]) {
-                return Ok(v);
-            }
-        }
+    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
+        && end > start
+        && let Ok(v) = serde_json::from_str(&text[start..=end])
+    {
+        return Ok(v);
     }
     Err(err(format!("model did not return JSON: {}", truncate(text, 200))))
 }
@@ -125,10 +124,7 @@ pub struct Ollama {
 
 impl Ollama {
     pub fn new(cfg: &ModelCfg) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(cfg.timeout))
-            .build()
-            .expect("HTTP client");
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(cfg.timeout)).build().expect("HTTP client");
         Self {
             model: RwLock::new(cfg.name.clone()),
             cfg: RwLock::new(cfg.clone()),
@@ -167,7 +163,12 @@ impl Ollama {
 
     pub async fn get_json(&self, path: &str) -> LlmResult<Value> {
         let url = format!("{}{path}", self.host());
-        let r = self.client.get(&url).send().await.map_err(|e| err(format!("Ollama is not reachable at {}: {e}", self.host())))?;
+        let r = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| err(format!("Ollama is not reachable at {}: {e}", self.host())))?;
         let r = r.error_for_status().map_err(|e| err(format!("Ollama error: {e}")))?;
         r.json().await.map_err(|e| err(format!("bad reply from Ollama: {e}")))
     }
@@ -258,7 +259,8 @@ impl Ollama {
 
     async fn post_chat(&self, body: &Value) -> LlmResult<(u16, String)> {
         let url = format!("{}/api/chat", self.host());
-        let r = self.client.post(&url).json(body).send().await.map_err(|e| err(format!("Ollama request failed: {e}")))?;
+        let r =
+            self.client.post(&url).json(body).send().await.map_err(|e| err(format!("Ollama request failed: {e}")))?;
         let status = r.status().as_u16();
         let text = r.text().await.map_err(|e| err(format!("Ollama request failed: {e}")))?;
         Ok((status, text))
@@ -292,12 +294,19 @@ impl Ollama {
     }
 
     pub async fn version(&self) -> String {
-        self.get_json("/api/version").await.ok().and_then(|v| v["version"].as_str().map(String::from)).unwrap_or_else(|| "?".into())
+        self.get_json("/api/version")
+            .await
+            .ok()
+            .and_then(|v| v["version"].as_str().map(String::from))
+            .unwrap_or_else(|| "?".into())
     }
 }
 
 fn names(models: &Value) -> Vec<String> {
-    models.as_array().map(|a| a.iter().filter_map(|m| m["name"].as_str().map(String::from)).collect()).unwrap_or_default()
+    models
+        .as_array()
+        .map(|a| a.iter().filter_map(|m| m["name"].as_str().map(String::from)).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -332,7 +341,10 @@ mod tests {
             ..Default::default()
         };
         let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(choose_model(&cfg, &s(&["minicpm-v4.7:35b-a3b", "gemma4:31b"])).as_deref(), Some("minicpm-v4.7:35b-a3b"));
+        assert_eq!(
+            choose_model(&cfg, &s(&["minicpm-v4.7:35b-a3b", "gemma4:31b"])).as_deref(),
+            Some("minicpm-v4.7:35b-a3b")
+        );
         assert_eq!(choose_model(&cfg, &s(&["llama3:8b", "qwen3-vl:latest"])).as_deref(), Some("qwen3-vl:latest"));
         assert_eq!(choose_model(&cfg, &s(&["llama3:8b"])), None);
     }

@@ -44,9 +44,7 @@ impl Notes {
 }
 
 fn is_note(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| NOTE_SUFFIXES.iter().any(|s| e.eq_ignore_ascii_case(s)))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| NOTE_SUFFIXES.iter().any(|s| e.eq_ignore_ascii_case(s)))
 }
 
 /// Note files under `dirs`, skipping anything below a dot-file or dot-folder.
@@ -87,12 +85,8 @@ fn score_note(text: &str, stem: &str, terms: &[String]) -> Option<(usize, String
     if score == 0 {
         return None;
     }
-    let idx = terms
-        .iter()
-        .filter_map(|t| low.find(t.as_str()))
-        .min()
-        .map(|byte| low[..byte].chars().count())
-        .unwrap_or(0);
+    let idx =
+        terms.iter().filter_map(|t| low.find(t.as_str())).min().map(|byte| low[..byte].chars().count()).unwrap_or(0);
     let snippet = char_slice(text, idx.saturating_sub(120), idx + 280).replace('\n', " ").trim().to_string();
     Some((score, snippet))
 }

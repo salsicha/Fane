@@ -18,15 +18,11 @@ pub static CONFIG_DIR: LazyLock<PathBuf> =
     LazyLock::new(|| dirs::config_dir().unwrap_or_else(|| home().join(".config")).join("fane"));
 pub static CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(|| CONFIG_DIR.join("config.toml"));
 pub static STATE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .unwrap_or_else(|| home().join(".local/state"))
-        .join("fane")
+    dirs::state_dir().or_else(dirs::data_local_dir).unwrap_or_else(|| home().join(".local/state")).join("fane")
 });
 /// Private per-session scratch space (screenshots, the IPC socket).
-pub static RUNTIME_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    dirs::runtime_dir().unwrap_or_else(|| std::env::temp_dir().join(format!("fane-{}", whoami())))
-});
+pub static RUNTIME_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| dirs::runtime_dir().unwrap_or_else(|| std::env::temp_dir().join(format!("fane-{}", whoami()))));
 
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
@@ -39,10 +35,10 @@ pub fn whoami() -> String {
 /// Expand `~` and `$VARS` in a configured path.
 pub fn expand(path: &str) -> PathBuf {
     let mut s = path.to_string();
-    if let Some(rest) = s.strip_prefix("~") {
-        if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') {
-            s = format!("{}{}", home().display(), rest);
-        }
+    if let Some(rest) = s.strip_prefix("~")
+        && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
+    {
+        s = format!("{}{}", home().display(), rest);
     }
     let re = regex::Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
     let s = re.replace_all(&s, |c: &regex::Captures| std::env::var(&c[1]).unwrap_or_else(|_| c[0].to_string()));
@@ -51,6 +47,7 @@ pub fn expand(path: &str) -> PathBuf {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub model: ModelCfg,
     pub suggestions: SuggestionsCfg,
@@ -61,22 +58,6 @@ pub struct Config {
     pub delegate: DelegateCfg,
     pub agent_mail: AgentMailCfg,
     pub mcp: McpCfg,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            model: ModelCfg::default(),
-            suggestions: SuggestionsCfg::default(),
-            privacy: PrivacyCfg::default(),
-            hotkey: HotkeyCfg::default(),
-            insert: InsertCfg::default(),
-            connectors: ConnectorsCfg::default(),
-            delegate: DelegateCfg::default(),
-            agent_mail: AgentMailCfg::default(),
-            mcp: McpCfg::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +87,7 @@ impl Default for ModelCfg {
     fn default() -> Self {
         let mut fallbacks: Vec<String> = RECOMMENDED_MODELS.iter().map(|s| s.to_string()).collect();
         fallbacks.extend(
-            ["minicpm-v4.7", "gemma4", "qwen3.8", "qwen3-vl", "minicpm-v", "qwen2.5vl", "llava"]
-                .map(String::from),
+            ["minicpm-v4.7", "gemma4", "qwen3.8", "qwen3-vl", "minicpm-v", "qwen2.5vl", "llava"].map(String::from),
         );
         Self {
             host: "http://127.0.0.1:11434".into(),
@@ -168,10 +148,17 @@ pub struct PrivacyCfg {
 impl Default for PrivacyCfg {
     fn default() -> Self {
         Self {
-            blocked_apps: ["keepassxc", "1password", "bitwarden", "seahorse", "gnome-keyring",
-                           "keychain access", "credentialuibroker"]
-                .map(String::from)
-                .to_vec(),
+            blocked_apps: [
+                "keepassxc",
+                "1password",
+                "bitwarden",
+                "seahorse",
+                "gnome-keyring",
+                "keychain access",
+                "credentialuibroker",
+            ]
+            .map(String::from)
+            .to_vec(),
             blocked_titles: ["Private Browsing", "Incognito", "InPrivate", "password"].map(String::from).to_vec(),
         }
     }
@@ -413,6 +400,7 @@ pub fn set_value_in(path: &Path, section: &str, key: &str, value: impl Into<toml
 }
 
 /// A string list as a TOML array value.
+#[cfg(test)]
 pub fn str_array(items: &[String]) -> toml_edit::Value {
     let mut a = toml_edit::Array::new();
     for s in items {
@@ -436,7 +424,8 @@ mod tests {
 
     #[test]
     fn partial_config_keeps_defaults() {
-        let cfg: Config = toml::from_str("[model]\nname = \"gemma4:31b\"\n[mcp.servers.fs]\ncommand = \"npx\"\n").unwrap();
+        let cfg: Config =
+            toml::from_str("[model]\nname = \"gemma4:31b\"\n[mcp.servers.fs]\ncommand = \"npx\"\n").unwrap();
         assert_eq!(cfg.model.name, "gemma4:31b");
         assert_eq!(cfg.model.num_ctx, 8192);
         assert_eq!(cfg.mcp.servers["fs"].command, "npx");

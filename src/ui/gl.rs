@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use egui_glow::glow;
 use glutin::config::{Config as GlConfig, ConfigTemplateBuilder, GlConfig as _};
-use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext, PossiblyCurrentGlContext};
+use glutin::context::{
+    ContextApi, ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext, PossiblyCurrentGlContext,
+};
 use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::surface::{GlSurface, Surface, SurfaceAttributesBuilder, SwapInterval, WindowSurface};
 use winit::event_loop::ActiveEventLoop;
@@ -125,7 +127,15 @@ impl GlWindow {
         let mut px = vec![0u8; (w * h * 4) as usize];
         // SAFETY: the context is current and `px` holds exactly w*h RGBA pixels.
         unsafe {
-            self.gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut px)));
+            self.gl.read_pixels(
+                0,
+                0,
+                w as i32,
+                h as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut px)),
+            );
         }
         if let Some(img) = image::RgbaImage::from_raw(w, h, px) {
             let img = image::imageops::flip_vertical(&img);

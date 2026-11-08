@@ -71,10 +71,10 @@ impl Palette {
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             actions.push(PaletteAction::Hide);
         }
-        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
-            if let Some(t) = self.answer_text() {
-                actions.push(PaletteAction::Insert(t));
-            }
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter))
+            && let Some(t) = self.answer_text()
+        {
+            actions.push(PaletteAction::Insert(t));
         }
         style::card().show(ui, |ui| {
             ui.set_width(WIDTH - 28.0);
@@ -82,7 +82,11 @@ impl Palette {
                 ui.label(style::brand());
                 if let Some(s) = &self.snapshot {
                     let label = s.window.label();
-                    let label: String = if label.chars().count() > 70 { label.chars().take(70).collect::<String>() + "…" } else { label };
+                    let label: String = if label.chars().count() > 70 {
+                        label.chars().take(70).collect::<String>() + "…"
+                    } else {
+                        label
+                    };
                     ui.label(style::meta(&format!("· {label}")));
                 }
             });

@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Arguments the model passed to a tool, with lenient accessors (models send "5" for 5).
 #[derive(Debug, Clone, Default)]
@@ -48,7 +48,9 @@ impl Args {
     /// A list of strings given either as an array or as a comma-separated string.
     pub fn list(&self, key: &str) -> Vec<String> {
         match self.0.get(key) {
-            Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            Some(Value::Array(a)) => {
+                a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+            }
             Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
             _ => vec![],
         }
@@ -140,6 +142,7 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
@@ -188,8 +191,13 @@ mod tests {
     #[tokio::test]
     async fn registry_calls_and_errors() {
         let mut reg = ToolRegistry::new();
-        reg.add(Tool::new("echo", "Echo", params(&["text"], &[("text", prop("string", ""))]),
-                          handler(|a: Args| async move { Ok(json!(a.require("text")?)) }), "Echoing"));
+        reg.add(Tool::new(
+            "echo",
+            "Echo",
+            params(&["text"], &[("text", prop("string", ""))]),
+            handler(|a: Args| async move { Ok(json!(a.require("text")?)) }),
+            "Echoing",
+        ));
         reg.add(Tool::new("obj", "Obj", params(&[], &[]), handler(|_| async { Ok(json!({"a": 1})) }), ""));
         assert_eq!(reg.call("echo", Args::from_value(json!({"text": "hi"}))).await, "hi");
         assert_eq!(reg.call("obj", Args::default()).await, r#"{"a":1}"#);

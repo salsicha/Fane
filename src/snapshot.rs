@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use image::{imageops::FilterType, DynamicImage};
+use image::{DynamicImage, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 
 use crate::config::PrivacyCfg;
@@ -36,8 +36,20 @@ impl WindowInfo {
     }
 
     pub fn is_terminal(&self) -> bool {
-        const TERMS: [&str; 12] = ["terminal", "kitty", "alacritty", "ptyxis", "konsole", "wezterm", "foot",
-                                   "tilix", "terminator", "xterm", "ghostty", "console"];
+        const TERMS: [&str; 12] = [
+            "terminal",
+            "kitty",
+            "alacritty",
+            "ptyxis",
+            "konsole",
+            "wezterm",
+            "foot",
+            "tilix",
+            "terminator",
+            "xterm",
+            "ghostty",
+            "console",
+        ];
         let app = self.app.to_lowercase();
         TERMS.iter().any(|t| app.contains(t))
     }
@@ -47,6 +59,7 @@ impl WindowInfo {
 pub struct Snapshot {
     pub window: WindowInfo,
     pub image: Option<Arc<DynamicImage>>,
+    #[allow(dead_code)]
     pub taken_at: SystemTime,
     /// True when privacy rules stopped us from looking at the screen.
     pub private: bool,
@@ -114,7 +127,8 @@ mod tests {
 
     #[test]
     fn privacy_rules() {
-        let rules = PrivacyCfg { blocked_apps: vec!["keepassxc".into()], blocked_titles: vec!["Private Browsing".into()] };
+        let rules =
+            PrivacyCfg { blocked_apps: vec!["keepassxc".into()], blocked_titles: vec!["Private Browsing".into()] };
         assert!(is_private(&WindowInfo::new("db.kdbx", "org.keepassxc.KeePassXC"), &rules));
         assert!(is_private(&WindowInfo::new("Mozilla Firefox Private Browsing", "firefox"), &rules));
         assert!(!is_private(&WindowInfo::new("Inbox", "thunderbird"), &rules));

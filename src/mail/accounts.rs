@@ -3,7 +3,6 @@
 //! Fane never stores Google credentials. It asks GOA for a short-lived OAuth token for the
 //! one account the user selected, and only that account.
 // Not yet reachable from main until the integrator wires the mailbox in.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -49,6 +48,7 @@ impl OnlineAccounts {
     }
 
     /// Drop the cached token, e.g. after the server rejected it.
+    #[allow(dead_code)]
     pub fn forget(&self, acc: &GoaAccount) {
         self.tokens.lock().unwrap().remove(&acc.path);
     }
@@ -157,8 +157,11 @@ impl OnlineAccounts {
         if acc.mail_disabled {
             return Err(AccountError(format!("Mail is switched off for {} in Settings → Online Accounts", acc.email)));
         }
-        let attention = |e: AccountError| AccountError(format!("{} needs attention in Settings → Online Accounts ({e})", acc.email));
-        let _: (i32,) = self.call(&acc.path, &format!("{}.Account", goa::GOA), "EnsureCredentials").await.map_err(attention)?;
+        let attention = |e: AccountError| {
+            AccountError(format!("{} needs attention in Settings → Online Accounts ({e})", acc.email))
+        };
+        let _: (i32,) =
+            self.call(&acc.path, &format!("{}.Account", goa::GOA), "EnsureCredentials").await.map_err(attention)?;
         let (token, expires_in): (String, i32) =
             self.call(&acc.path, &format!("{}.OAuth2Based", goa::GOA), "GetAccessToken").await.map_err(attention)?;
         let lifetime = if expires_in > 0 { expires_in as u64 } else { 600 };
@@ -210,14 +213,20 @@ mod tests {
     fn parses_managed_objects() {
         use zbus::{OwnedVariant, Str};
         let s = |v: &str| OwnedVariant::from(Str::from(v.to_string()));
-        let props = |kv: Vec<(&str, OwnedVariant)>| -> goa::Props { kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
+        let props =
+            |kv: Vec<(&str, OwnedVariant)>| -> goa::Props { kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
         let mut ifaces = HashMap::new();
         ifaces.insert(
             "org.gnome.OnlineAccounts.Account".to_string(),
-            props(vec![("ProviderType", s("google")), ("PresentationIdentity", s("fane.agent@gmail.com")),
-                       ("MailDisabled", OwnedVariant::from(false)), ("AttentionNeeded", OwnedVariant::from(true))]),
+            props(vec![
+                ("ProviderType", s("google")),
+                ("PresentationIdentity", s("fane.agent@gmail.com")),
+                ("MailDisabled", OwnedVariant::from(false)),
+                ("AttentionNeeded", OwnedVariant::from(true)),
+            ]),
         );
-        ifaces.insert("org.gnome.OnlineAccounts.Mail".to_string(), props(vec![("Name", s("Fane")), ("ImapHost", s(""))]));
+        ifaces
+            .insert("org.gnome.OnlineAccounts.Mail".to_string(), props(vec![("Name", s("Fane")), ("ImapHost", s(""))]));
         let acc = goa::account_from("/a/1", &ifaces).unwrap();
         assert_eq!(acc.email, "fane.agent@gmail.com");
         assert_eq!(acc.name, "Fane");

@@ -108,6 +108,7 @@ impl McpManager {
     }
 
     /// Names of the configured servers (those with a command).
+    #[allow(dead_code)]
     pub fn names(&self) -> Vec<String> {
         self.servers.iter().map(|s| s.name.clone()).collect()
     }
@@ -134,10 +135,7 @@ impl McpManager {
 
     /// Names of servers that failed, with the error.
     pub fn errors(&self) -> Vec<(String, String)> {
-        self.servers
-            .iter()
-            .filter_map(|s| s.error.lock().unwrap().clone().map(|e| (s.name.clone(), e)))
-            .collect()
+        self.servers.iter().filter_map(|s| s.error.lock().unwrap().clone().map(|e| (s.name.clone(), e))).collect()
     }
 
     pub async fn stop(&self) {
@@ -213,10 +211,8 @@ fn save_image(data: &str, mime_type: &str) -> anyhow::Result<PathBuf> {
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
         .collect();
     let ext = if ext.is_empty() { "png".to_string() } else { ext };
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
     loop {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("fane-mcp-{}-{nanos:x}{n}.{ext}", std::process::id()));
@@ -352,10 +348,7 @@ for line in sys.stdin:
         assert_eq!(reg.call("fake_srv__fail", Args::default()).await, "error: nope");
 
         mgr.stop().await;
-        assert_eq!(
-            reg.call("fake_srv__fail", Args::default()).await,
-            "error: MCP server fake.srv is not running"
-        );
+        assert_eq!(reg.call("fake_srv__fail", Args::default()).await, "error: MCP server fake.srv is not running");
     }
 
     #[test]

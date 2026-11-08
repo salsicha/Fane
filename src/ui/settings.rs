@@ -29,7 +29,6 @@ pub struct Settings {
     accounts: Option<Result<Vec<GoaAccount>, String>>,
     owner: String,
     mail_status: String,
-    pub scan_on_open: bool,
 }
 
 impl Settings {
@@ -45,7 +44,6 @@ impl Settings {
             server_status: String::new(),
             accounts: None,
             mail_status: String::new(),
-            scan_on_open: true,
         }
     }
 
@@ -231,7 +229,11 @@ impl Settings {
             let save = ui
                 .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let b = ui.button("Save").clicked();
-                    let edit = ui.add(egui::TextEdit::singleline(&mut self.owner).hint_text("you@example.com").desired_width(f32::INFINITY));
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.owner)
+                            .hint_text("you@example.com")
+                            .desired_width(f32::INFINITY),
+                    );
                     b || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 })
                 .inner;
@@ -251,7 +253,8 @@ impl Settings {
         ui.label("Fane's own Gmail account");
         if !cfg!(target_os = "linux") {
             ui.label(
-                RichText::new("Fane's own mailbox uses GNOME Online Accounts, so it's only available on Linux.").color(dim),
+                RichText::new("Fane's own mailbox uses GNOME Online Accounts, so it's only available on Linux.")
+                    .color(dim),
             );
         } else {
             let current = self.cfg.agent_mail.account.trim().to_lowercase();
@@ -270,9 +273,14 @@ impl Settings {
                                 ui.label("No Google accounts in Online Accounts");
                             }
                             for a in accs {
-                                let text = if a.mail_disabled { format!("{} (mail off in Settings)", a.email) } else { a.email.clone() };
+                                let text = if a.mail_disabled {
+                                    format!("{} (mail off in Settings)", a.email)
+                                } else {
+                                    a.email.clone()
+                                };
                                 let selected = a.email.to_lowercase() == current;
-                                if ui.add_enabled(!a.mail_disabled, egui::Button::selectable(selected, text)).clicked() {
+                                if ui.add_enabled(!a.mail_disabled, egui::Button::selectable(selected, text)).clicked()
+                                {
                                     actions.push(SettingsAction::SelectAccount(a.email.clone()));
                                 }
                             }
@@ -290,9 +298,11 @@ impl Settings {
                 }
             });
             ui.label(
-                RichText::new("Give Fane an account of its own (Settings → Online Accounts → Google), not your personal one.")
-                    .color(dim)
-                    .small(),
+                RichText::new(
+                    "Give Fane an account of its own (Settings → Online Accounts → Google), not your personal one.",
+                )
+                .color(dim)
+                .small(),
             );
         }
         if !self.mail_status.is_empty() {

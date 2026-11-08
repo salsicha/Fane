@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::ModelCfg;
-use crate::llm::{encode_image, parse_json, LlmError, LlmResult, Ollama};
+use crate::llm::{LlmError, LlmResult, Ollama, encode_image, parse_json};
 use crate::snapshot::Snapshot;
 use crate::tools::{Args, ToolRegistry};
 
@@ -66,8 +66,7 @@ Tools:
     )
 }
 
-const DONE_NOTE: &str =
-    "The text is now at the user's cursor (nothing was sent). Reply with one short line, no tools.";
+const DONE_NOTE: &str = "The text is now at the user's cursor (nothing was sent). Reply with one short line, no tools.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCall {
@@ -196,7 +195,12 @@ impl Agent {
                     .as_array()
                     .map(|a| {
                         a.iter()
-                            .map(|c| (c["function"]["name"].as_str().unwrap_or("").to_string(), c["function"]["arguments"].clone()))
+                            .map(|c| {
+                                (
+                                    c["function"]["name"].as_str().unwrap_or("").to_string(),
+                                    c["function"]["arguments"].clone(),
+                                )
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
@@ -252,10 +256,10 @@ impl Agent {
                 messages.push(json!({"role": "user", "content": note}));
                 let msg = self.llm.chat(&messages, None, (mode == "json").then_some(&schema), None).await?;
                 let mut text = msg["content"].as_str().unwrap_or("").to_string();
-                if mode == "json" {
-                    if let Ok(v) = parse_json(&text) {
-                        text = v["answer"].as_str().unwrap_or("").to_string();
-                    }
+                if mode == "json"
+                    && let Ok(v) = parse_json(&text)
+                {
+                    text = v["answer"].as_str().unwrap_or("").to_string();
                 }
                 let text = text.trim();
                 result.text = if text.is_empty() { "Inserted.".into() } else { text.into() };

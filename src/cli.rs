@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::config::{self, Config, CONFIG_PATH, RECOMMENDED_MODELS, STATE_DIR};
+use crate::config::{self, CONFIG_PATH, Config, RECOMMENDED_MODELS, STATE_DIR};
 use crate::ipc;
 
 #[derive(Parser)]
@@ -187,7 +187,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn setup_logging(verbose: bool) {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let _ = std::fs::create_dir_all(&*STATE_DIR);
     let level = if verbose { "debug" } else { "info" };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(format!("fane={level},warn")));
@@ -217,7 +217,10 @@ fn cmd_run(verbose: bool) -> anyhow::Result<i32> {
 fn spawn_app() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("run").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    cmd.arg("run")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -304,7 +307,8 @@ fn cmd_mail(action: MailCmd) -> anyhow::Result<i32> {
             None => println!("Not set: Fane won't act on any email. Set it with `fane mail owner you@example.com`."),
         },
         MailCmd::Owner { address: Some(address) } => {
-            let address = if address.eq_ignore_ascii_case("none") { String::new() } else { address.trim().to_lowercase() };
+            let address =
+                if address.eq_ignore_ascii_case("none") { String::new() } else { address.trim().to_lowercase() };
             if !address.is_empty() && !crate::core::valid_email(&address) {
                 eprintln!("{address} doesn't look like an email address.");
                 return Ok(1);
@@ -319,7 +323,10 @@ fn cmd_mail(action: MailCmd) -> anyhow::Result<i32> {
         }
         MailCmd::Status => {
             println!("account:  {}", if current.is_empty() { "(off)" } else { &current });
-            println!("you:      {}", cfg.agent_mail.owner().unwrap_or_else(|| "(not set — no mail is acted on)".into()));
+            println!(
+                "you:      {}",
+                cfg.agent_mail.owner().unwrap_or_else(|| "(not set — no mail is acted on)".into())
+            );
             match ipc::send("status", json!({})) {
                 Some(r) => {
                     let watching = r["mail_account"].as_str().unwrap_or("nothing");
@@ -389,7 +396,7 @@ fn cmd_ollama(action: OllamaCmd) -> anyhow::Result<i32> {
 }
 
 fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
-    use crate::llm::{find_installed, Ollama};
+    use crate::llm::{Ollama, find_installed};
     let cfg = Config::load()?;
     let ok = |b: bool| if b { "✓" } else { "✗" };
     let rt = runtime();
@@ -415,7 +422,8 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
         println!("{} focused window: {}", ok(!win.title.is_empty() || !win.app.is_empty()), win.label());
         if screenshot {
             let img = desktop.screenshot().await;
-            let what = img.map(|i| format!("{}x{} via {}", i.width(), i.height(), desktop.screen_backend().unwrap_or_default()));
+            let what = img
+                .map(|i| format!("{}x{} via {}", i.width(), i.height(), desktop.screen_backend().unwrap_or_default()));
             println!("{} screenshot: {}", ok(what.is_some()), what.unwrap_or_else(|| "no backend worked".into()));
         } else {
             println!("  screenshot: skipped (pass --screenshot to test capture)");
@@ -427,20 +435,35 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
             println!("{} {tool} CLI for delegation", ok(which::which(tool).is_ok()));
         }
         let mail = &cfg.agent_mail.account;
-        println!("{} Fane's email: {}", ok(!mail.is_empty()), if mail.is_empty() { "off (fane mail accounts / fane mail use)" } else { mail });
+        println!(
+            "{} Fane's email: {}",
+            ok(!mail.is_empty()),
+            if mail.is_empty() { "off (fane mail accounts / fane mail use)" } else { mail }
+        );
         if !mail.is_empty() {
             let owner = cfg.agent_mail.owner();
-            println!("{} your email: {}", ok(owner.is_some()), owner.unwrap_or_else(|| "not set — no mail will be acted on".into()));
+            println!(
+                "{} your email: {}",
+                ok(owner.is_some()),
+                owner.unwrap_or_else(|| "not set — no mail will be acted on".into())
+            );
         }
         let servers: Vec<&String> = cfg.mcp.servers.keys().collect();
-        println!("  MCP servers configured: {}", if servers.is_empty() { "none".into() } else { servers.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ") });
+        println!(
+            "  MCP servers configured: {}",
+            if servers.is_empty() {
+                "none".into()
+            } else {
+                servers.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            }
+        );
         println!("  running: {}", if ipc::running() { "yes" } else { "no" });
     });
     Ok(0)
 }
 
 fn cmd_eval(args: EvalArgs) -> anyhow::Result<i32> {
-    use crate::evals::runner::{list_cases, run, EvalOptions};
+    use crate::evals::runner::{EvalOptions, list_cases, run};
     if args.list {
         for line in list_cases() {
             println!("{line}");

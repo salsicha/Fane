@@ -25,7 +25,12 @@ mod imp {
     }
 
     fn item(label: &str, id: &'static str) -> MenuItem<FaneTray> {
-        StandardItem { label: label.into(), activate: Box::new(move |t: &mut FaneTray| t.send(id)), ..Default::default() }.into()
+        StandardItem {
+            label: label.into(),
+            activate: Box::new(move |t: &mut FaneTray| t.send(id)),
+            ..Default::default()
+        }
+        .into()
     }
 
     impl ksni::Tray for FaneTray {

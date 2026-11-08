@@ -3,7 +3,6 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use serde_json::Value;
 use tokio::sync::oneshot;
@@ -16,11 +15,23 @@ const FADE: Duration = Duration::from_millis(180);
 
 pub enum Card {
     Suggestion(Suggestion),
-    Working { job: u64, title: String, status: String },
-    Result { job: u64, title: String, text: String, error: bool },
+    Working {
+        job: u64,
+        title: String,
+        status: String,
+    },
+    Result {
+        job: u64,
+        title: String,
+        text: String,
+        error: bool,
+    },
     Toast(String),
     /// "Send this email?" owns the card until answered; unanswered = not sent.
-    Confirm { details: Value, tx: Option<oneshot::Sender<bool>> },
+    Confirm {
+        details: Value,
+        tx: Option<oneshot::Sender<bool>>,
+    },
 }
 
 pub enum OverlayAction {
@@ -104,10 +115,10 @@ impl Overlay {
     }
 
     pub fn update_status(&mut self, job: u64, text: &str) {
-        if let Some(Card::Working { job: j, status, .. }) = &mut self.card {
-            if *j == job {
-                *status = text.to_string();
-            }
+        if let Some(Card::Working { job: j, status, .. }) = &mut self.card
+            && *j == job
+        {
+            *status = text.to_string();
         }
     }
 
@@ -137,10 +148,10 @@ impl Overlay {
     }
 
     fn resolve(&mut self, ok: bool) {
-        if let Some(Card::Confirm { tx, .. }) = &mut self.card {
-            if let Some(tx) = tx.take() {
-                let _ = tx.send(ok);
-            }
+        if let Some(Card::Confirm { tx, .. }) = &mut self.card
+            && let Some(tx) = tx.take()
+        {
+            let _ = tx.send(ok);
         }
         self.card = None;
         self.drain();
@@ -195,13 +206,13 @@ impl Overlay {
 
     /// Advance the fade-out; returns true when the window should now be hidden.
     pub fn tick(&mut self) -> bool {
-        if let Some(t) = self.hiding_since {
-            if t.elapsed() >= FADE {
-                self.hiding_since = None;
-                self.card = None;
-                self.shown_at = None;
-                return true;
-            }
+        if let Some(t) = self.hiding_since
+            && t.elapsed() >= FADE
+        {
+            self.hiding_since = None;
+            self.card = None;
+            self.shown_at = None;
+            return true;
         }
         false
     }
@@ -237,7 +248,10 @@ impl Overlay {
             Some(Card::Confirm { details, .. }) => {
                 buttons = vec![("Cancel", false, 6), ("Send", true, 7)];
                 let list = |k: &str| {
-                    details[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
+                    details[k]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default()
                 };
                 let mut to = list("to");
                 let cc = list("cc");
@@ -286,7 +300,8 @@ impl Overlay {
                 });
             }
         });
-        self.hovered = resp.response.rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or(egui::pos2(-1.0, -1.0)));
+        self.hovered =
+            resp.response.rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or(egui::pos2(-1.0, -1.0)));
 
         if close {
             if self.confirming() {
@@ -342,10 +357,5 @@ impl Drop for Overlay {
 
 fn short_app(label: &str) -> String {
     let app = label.split(" — ").next().unwrap_or("");
-    if app.is_empty() {
-        String::new()
-    } else {
-        format!("· {}", app.chars().take(40).collect::<String>())
-    }
+    if app.is_empty() { String::new() } else { format!("· {}", app.chars().take(40).collect::<String>()) }
 }
-

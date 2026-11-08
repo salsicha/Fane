@@ -5,24 +5,24 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
-use serde_json::{json, Value};
-use tokio::sync::{oneshot, Notify};
+use serde_json::{Value, json};
+use tokio::sync::{Notify, oneshot};
 
 use crate::agent::{Agent, AgentResult, ToolModes};
-use crate::config::{set_value, Config};
-use crate::connectors::builtin::{builtin_tools, Handlers};
+use crate::config::{Config, set_value};
+use crate::connectors::builtin::{Handlers, builtin_tools};
 use crate::connectors::delegate::Delegate;
 use crate::connectors::mcp::McpManager;
 use crate::connectors::notes::Notes;
 use crate::connectors::thunderbird::ThunderbirdMail;
 use crate::discovery::{self, OllamaServer};
-use crate::llm::{choose_model, Ollama};
+use crate::llm::{Ollama, choose_model};
 use crate::mail::accounts::{GoaAccount, OnlineAccounts};
-use crate::mail::mailbox::{mail_tool_names, AgentMailbox, MailHost};
+use crate::mail::mailbox::{AgentMailbox, MailHost, mail_tool_names};
 use crate::platform::{self, Desktop};
-use crate::snapshot::{is_private, Snapshot, WindowInfo};
+use crate::snapshot::{Snapshot, WindowInfo, is_private};
 use crate::suggester::{Suggester, Suggestion};
-use crate::tools::{handler, Args, ToolRegistry};
+use crate::tools::{Args, ToolRegistry, handler};
 
 /// Titles of Fane's own windows; never treated as the user's context.
 pub const OWN_TITLES: [&str; 3] = ["Fane", "Fane Suggestion", "Fane Settings"];
@@ -39,7 +39,11 @@ pub enum WindowKind {
 pub enum UiEvent {
     Suggestion(Suggestion),
     JobStatus(u64, String),
-    JobDone { job: u64, result: Option<AgentResult>, error: Option<String> },
+    JobDone {
+        job: u64,
+        result: Option<AgentResult>,
+        error: Option<String>,
+    },
     Notify(String),
     /// Show a Send/Cancel card; answer on the channel (dropping it means "no").
     ConfirmSend(Value, oneshot::Sender<bool>),
@@ -50,7 +54,12 @@ pub enum UiEvent {
     OpenSettings,
     Paused(bool),
     Quit,
-    PaletteReady { snap: Box<Snapshot>, prefill: String, submit: bool, answer: Option<String> },
+    PaletteReady {
+        snap: Box<Snapshot>,
+        prefill: String,
+        submit: bool,
+        answer: Option<String>,
+    },
     Servers(Result<Vec<OllamaServer>, String>),
     OllamaUsed(Result<(String, String), String>),
     MailAccounts(Result<Vec<GoaAccount>, String>),
@@ -58,6 +67,7 @@ pub enum UiEvent {
     /// egui asked a window to repaint after this delay.
     Redraw(WindowKind, Duration),
     TrayMenu(String),
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Hotkey,
 }
 
@@ -242,7 +252,8 @@ impl Core {
             recent_emails: handler(move |a: Args| {
                 let mail = mail.clone();
                 async move {
-                    mail.recent(a.int("limit", 10).clamp(1, 100) as usize, &a.str("query"), a.bool("include_body")).await
+                    mail.recent(a.int("limit", 10).clamp(1, 100) as usize, &a.str("query"), a.bool("include_body"))
+                        .await
                 }
             }),
             delegate: handler(move |a: Args| {
@@ -350,7 +361,9 @@ impl Core {
     pub async fn prepare_palette(&self) -> Snapshot {
         let snap = match tokio::time::timeout(Duration::from_millis(1500), self.snapshot(true)).await {
             Ok(s) => s,
-            Err(_) => self.last_snapshot.lock().unwrap().clone().unwrap_or_else(|| Snapshot::new(WindowInfo::default())),
+            Err(_) => {
+                self.last_snapshot.lock().unwrap().clone().unwrap_or_else(|| Snapshot::new(WindowInfo::default()))
+            }
         };
         *self.last_snapshot.lock().unwrap() = Some(snap.clone());
         snap
@@ -637,7 +650,11 @@ impl Core {
 
 pub fn valid_email(s: &str) -> bool {
     let Some((user, domain)) = s.split_once('@') else { return false };
-    !user.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.') && !s.contains(char::is_whitespace)
+    !user.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !s.contains(char::is_whitespace)
 }
 
 pub enum Clip {
