@@ -1,7 +1,6 @@
 //! Hand hard tasks to a command-line coding agent (CodeGem, Qwen Code, SuperQode's DeepSeek harness,
 //! Claude Code, Codex, or one you configure) running non-interactively.
 
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -20,44 +19,6 @@ pub struct Vars {
 pub struct Delegate {
     pub cfg: DelegateCfg,
     agents: Vec<(String, AgentCfg)>,
-}
-
-/// Starts SuperQode's CLI from the bundled Python (no console-script shims, so the bundle can
-/// live anywhere).
-const SUPERQODE_LAUNCH: &str =
-    "import sys; from superqode.main import cli_main; sys.argv[0] = 'superqode'; sys.exit(cli_main())";
-
-/// CodeGem shipped inside Fane's package: the bundled Python and the arguments that start
-/// `superqode`. Looked for next to the executable (Windows), in `../lib/fane` (Linux packages),
-/// in `../Resources` (macOS app), and in `$FANE_BUNDLE_DIR`, as `codegem/` or `codegem-<arch>/`.
-pub fn bundled(program: &str) -> Option<(PathBuf, Vec<String>)> {
-    if program != "superqode" {
-        return None;
-    }
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let mut roots: Vec<PathBuf> = std::env::var_os("FANE_BUNDLE_DIR").map(PathBuf::from).into_iter().collect();
-    roots.extend([dir.join("../lib/fane"), dir.join("../Resources"), dir.to_path_buf()]);
-    let names = ["codegem".to_string(), format!("codegem-{}", std::env::consts::ARCH)];
-    for root in &roots {
-        for name in &names {
-            let python = if cfg!(windows) {
-                root.join(name).join("python").join("python.exe")
-            } else {
-                root.join(name).join("python").join("bin").join("python3")
-            };
-            if python.is_file() {
-                return Some((python, vec!["-I".into(), "-c".into(), SUPERQODE_LAUNCH.into()]));
-            }
-        }
-    }
-    None
-}
-
-/// Where to find a harness's program: on PATH, else bundled with Fane. Returns the
-/// executable and any arguments that must come first.
-fn resolve(program: &str) -> Option<(PathBuf, Vec<String>)> {
-    which::which(program).ok().map(|p| (p, vec![])).or_else(|| bundled(program))
 }
 
 /// Fill in `{task}`, `{model}`, `{ollama_host}` and `{cwd}`.
@@ -79,7 +40,7 @@ impl Delegate {
     pub fn available(&self) -> Vec<(String, String)> {
         self.agents
             .iter()
-            .filter(|(_, a)| a.cmd.first().is_some_and(|c| resolve(c).is_some()))
+            .filter(|(_, a)| a.cmd.first().is_some_and(|c| which::which(c).is_ok()))
             .map(|(n, a)| (n.clone(), a.description.clone()))
             .collect()
     }
@@ -94,15 +55,14 @@ impl Delegate {
         let Some((program, args)) = spec.cmd.split_first() else {
             return format!("error: no command configured for {agent}");
         };
-        let Some((program_path, prefix)) = resolve(program) else {
+        let Ok(program_path) = which::which(program) else {
             return format!("error: {program} is not installed");
         };
         let workdir = expand(if cwd.trim().is_empty() { &self.cfg.cwd } else { cwd });
         let model = if spec.model.is_empty() { vars.model.as_str() } else { spec.model.as_str() };
         let dir = workdir.display().to_string();
         let fill = |t: &str| fill(t, task, model, &vars.ollama_host, &dir);
-        let mut argv: Vec<String> = prefix;
-        argv.extend(args.iter().map(|a| fill(a)));
+        let mut argv: Vec<String> = args.iter().map(|a| fill(a)).collect();
         if !spec.cmd.iter().any(|a| a.contains("{task}")) {
             argv.push(task.to_string());
         }

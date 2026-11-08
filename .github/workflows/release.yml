@@ -34,11 +34,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deb
-      - uses: astral-sh/setup-uv@v6
-      - name: Bundle CodeGem
-        run: |
-          packaging/codegem/bundle.sh target/codegem linux-${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }}
-          target/codegem/python/bin/python3 -I -c "import sys; from superqode.main import cli_main; sys.argv=['superqode','--version']; sys.exit(cli_main())"
       - run: cargo build --release --locked
       - run: cargo deb --no-build
       - uses: actions/upload-artifact@v4
@@ -54,7 +49,6 @@ jobs:
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v6
       - run: packaging/macos/build-app.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -67,12 +61,6 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v6
-      - name: Bundle CodeGem
-        shell: bash
-        run: |
-          packaging/codegem/bundle.sh target/codegem windows-x86_64
-          target/codegem/python/python.exe -I -c "import sys; from superqode.main import cli_main; sys.argv=['superqode','--version']; sys.exit(cli_main())"
       - run: cargo build --release --locked
       - name: Package
         shell: pwsh
@@ -86,7 +74,7 @@ jobs:
             $env:PATH += ";${env:ProgramFiles(x86)}\NSIS"
           }
           makensis /DVERSION=$version packaging\windows\fane.nsi
-          Compress-Archive -Path target\release\fane.exe, target\codegem -DestinationPath "dist\Fane-$version-windows-x64.zip"
+          Compress-Archive -Path target\release\fane.exe -DestinationPath "dist\Fane-$version-windows-x64.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: windows

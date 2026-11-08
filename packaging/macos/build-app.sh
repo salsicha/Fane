@@ -25,14 +25,6 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/fane.icns"
 
-# CodeGem with its own Python, one per CPU type (Fane picks codegem-<arch> at runtime).
-packaging/codegem/bundle.sh "$app/Contents/Resources/codegem-aarch64" macos-aarch64
-packaging/codegem/bundle.sh "$app/Contents/Resources/codegem-x86_64" macos-x86_64
-if [ "$(uname -m)" = arm64 ]; then
-    "$app/Contents/Resources/codegem-aarch64/python/bin/python3" -I -c \
-        "import sys; from superqode.main import cli_main; sys.argv=['superqode','--version']; sys.exit(cli_main())"
-fi
-
 sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
 # Ad-hoc signature: required to run on Apple silicon. Not notarized, so the first launch
 # needs right-click → Open (or `xattr -dr com.apple.quarantine /Applications/Fane.app`).
@@ -43,5 +35,5 @@ rm -f "$dmg"
 staging=$(mktemp -d)
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname Fane -srcfolder "$staging" -ov -format ULMO "$dmg"  # LZMA: much smaller than UDZO
+hdiutil create -volname Fane -srcfolder "$staging" -ov -format UDZO "$dmg"
 echo "built $dmg"

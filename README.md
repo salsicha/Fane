@@ -29,7 +29,7 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
 
 You also need [Ollama](https://ollama.com/download) with one of the
 [recommended models](#recommended-models), e.g. `ollama pull gemma4:26b`, and optionally its
-[coding agent](#coding-agents).
+[coding agent](#coding-agents) (for the default, CodeGem: `uv tool install superqode`).
 
 ### Ubuntu 24.04+ (apt)
 
@@ -79,7 +79,7 @@ cargo install --path .        # puts `fane` in ~/.cargo/bin
 ```
 
 No system libraries are needed to build on Linux: Fane loads X11, Wayland and OpenGL at
-runtime. A source install doesn't include CodeGem; install it with `uv tool install superqode`.
+runtime.
 
 ## Using it
 
@@ -218,17 +218,18 @@ model every harness that's installed, with `[delegate] default` first:
 
 | Name | Install | Runs |
 | --- | --- | --- |
-| `codegem` (default) | Included with Fane's packages; or `uv tool install superqode` | `superqode harness run codegem "<task>" --provider ollama --model <model> --working-dir <dir>` |
+| `codegem` (default) | `uv tool install superqode` | `superqode harness run codegem "<task>" --provider ollama --model <model> --working-dir <dir>` |
 | `qwen` | `npm install -g @qwen-code/qwen-code` ([Qwen Code](https://github.com/QwenLM/qwen-code)) | `qwen --auth-type openai --openai-base-url <ollama>/v1 --openai-api-key ollama -m <model> "<task>"` |
-| `deepseek` | Included with Fane's packages (part of SuperQode) | `superqode harness run ds4-coding "<task>" --provider ollama --model <model> --working-dir <dir>` |
+| `deepseek` | `uv tool install superqode` (same package as CodeGem) | `superqode harness run ds4-coding "<task>" --provider ollama --model <model> --working-dir <dir>` |
 | `claude` | [Claude Code](https://claude.com/claude-code) | `claude -p "<task>"` |
 | `codex` | [Codex](https://github.com/openai/codex) | `codex exec "<task>"` |
 
 The three local harnesses run on the same Ollama model and server as Fane (including a
 server you picked in Settings), so nothing leaves your network and the model doesn't have to
 be loaded twice. CodeGem and the DeepSeek harness both come from
-[SuperQode](https://pypi.org/project/superqode/) (Apache-2.0), which Fane's packages include
-with a private copy of Python; Fane uses that copy when `superqode` isn't on your PATH.
+[SuperQode](https://pypi.org/project/superqode/), a Python tool; Fane itself is a single Rust
+binary with no Python, so install SuperQode separately if you want either harness
+(`fane doctor` shows what's missing and how to install it).
 (The npm package `run-deepseek-cli` was tried for pairing 3 but only talks to DeepSeek's
 cloud API, so it can't use a local model.)
 
@@ -405,10 +406,7 @@ a `v*` tag is pushed: `.deb` packages (amd64, arm64) with `cargo deb`, a univers
 `.dmg` ([`packaging/macos/`](packaging/macos/)), a Windows installer and zip
 ([`packaging/windows/`](packaging/windows/)), and the signed apt repository on GitHub Pages
 ([`packaging/apt/make-repo.sh`](packaging/apt/make-repo.sh)). The apt repository needs a
-one-time setup described at the top of that workflow. Every package includes CodeGem, built by
-[`packaging/codegem/bundle.sh`](packaging/codegem/bundle.sh) (a pinned SuperQode on a
-relocatable CPython from python-build-standalone); to build a `.deb` locally, run
-`packaging/codegem/bundle.sh target/codegem` before `cargo deb`.
+one-time setup described at the top of that workflow.
 
 ## Status and roadmap
 

@@ -436,13 +436,15 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
             println!("{} {text}", ok(good));
         }
         for (i, (name, agent)) in cfg.delegate.all_agents().iter().enumerate() {
-            let first = agent.cmd.first().map(String::as_str).unwrap_or("?");
-            let on_path = which::which(first).is_ok();
-            let bundled = !on_path && crate::connectors::delegate::bundled(first).is_some();
-            let installed = on_path || bundled;
+            let program = agent.cmd.first().map(String::as_str).unwrap_or("?");
+            let installed = which::which(program).is_ok();
             let default = if i == 0 { ", default" } else { "" };
-            let program = if bundled { format!("{first}, bundled with Fane") } else { first.to_string() };
-            println!("{} delegate to {name} ({program}{default})", ok(installed));
+            let hint = match (installed, program) {
+                (false, "superqode") => " — install: uv tool install superqode",
+                (false, "qwen") => " — install: npm install -g @qwen-code/qwen-code",
+                _ => "",
+            };
+            println!("{} delegate to {name} ({program}{default}){hint}", ok(installed));
         }
         let mail = &cfg.agent_mail.account;
         println!(

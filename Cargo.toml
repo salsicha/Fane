@@ -100,8 +100,4 @@ assets = [
     ["packaging/linux/70-fane-uinput.rules", "usr/share/doc/fane/examples/", "644"],
     ["assets/fonts/LICENSE-DejaVu.txt", "usr/share/doc/fane/", "644"],
     ["README.md", "usr/share/doc/fane/", "644"],
-    # CodeGem with its own Python; build it first with packaging/codegem/bundle.sh target/codegem
-    ["target/codegem/python/bin/*", "usr/lib/fane/codegem/python/bin/", "755"],
-    ["target/codegem/python/lib/**/*", "usr/lib/fane/codegem/python/lib/", "644"],
-    ["target/codegem/README", "usr/lib/fane/codegem/README", "644"],
 ]
