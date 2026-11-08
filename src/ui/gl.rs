@@ -39,6 +39,8 @@ pub fn gl_config(event_loop: &ActiveEventLoop) -> anyhow::Result<GlConfig> {
 
 pub struct GlWindow {
     pub window: Window,
+    /// The title we gave it (winit can't read titles back on every platform).
+    pub title: String,
     context: PossiblyCurrentContext,
     surface: Surface<WindowSurface>,
     pub egui: egui_glow::EguiGlow,
@@ -47,6 +49,7 @@ pub struct GlWindow {
 
 impl GlWindow {
     pub fn new(event_loop: &ActiveEventLoop, config: &GlConfig, attrs: WindowAttributes) -> anyhow::Result<Self> {
+        let title = attrs.title.clone();
         let window = glutin_winit::finalize_window(event_loop, attrs, config)
             .map_err(|e| anyhow::anyhow!("cannot create window: {e}"))?;
         let display = config.display();
@@ -78,7 +81,7 @@ impl GlWindow {
             })
         });
         let egui = egui_glow::EguiGlow::new(event_loop, gl.clone(), None, Some(window.scale_factor() as f32), true);
-        Ok(Self { window, context, surface, egui, gl })
+        Ok(Self { window, title, context, surface, egui, gl })
     }
 
     fn make_current(&self) {
@@ -126,7 +129,9 @@ impl GlWindow {
         }
         if let Some(img) = image::RgbaImage::from_raw(w, h, px) {
             let img = image::imageops::flip_vertical(&img);
-            let _ = img.save(dir.join(format!("{}.png", self.window.title())));
+            if let Err(e) = img.save(dir.join(format!("{}.png", self.title))) {
+                tracing::warn!("cannot save frame snapshot: {e}");
+            }
         }
     }
 

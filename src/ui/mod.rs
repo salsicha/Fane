@@ -285,7 +285,7 @@ impl App {
         if !self.x11 && kind != WindowKind::Settings && self.core.desktop.helper_available() {
             // Native Wayland: only the GNOME helper extension can place us.
             let core = self.core.clone();
-            let title = win.window.title();
+            let title = win.title.clone();
             self.rt.spawn(async move { core.desktop.place_window(&title, x, y, true).await });
         }
     }
