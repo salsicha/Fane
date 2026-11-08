@@ -56,7 +56,7 @@ if [ "$platform" = macos-x86_64 ]; then
     constraints=(--constraint "$work/constraints.txt")
 fi
 "$uv" pip install --no-cache --only-binary :all: --target "$site" --python-platform "$target" \
-    --python-version "$py" "${constraints[@]}" "superqode==$superqode_version"
+    --python-version "$py" ${constraints[@]+"${constraints[@]}"} "superqode==$superqode_version"
 
 # Headers, docs, tests and caches aren't needed to run.
 rm -rf "$out/python/include" "$out/python/share" "$out/python/lib/python$py/test" \
