@@ -458,6 +458,7 @@ impl App {
 
     // --- painting -----------------------------------------------------------------------
     fn paint(&mut self, event_loop: &ActiveEventLoop, kind: WindowKind) {
+        tracing::trace!("paint {kind:?} (visible: {})", self.visible.contains(&kind));
         if !self.visible.contains(&kind) {
             return;
         }
@@ -662,6 +663,7 @@ impl ApplicationHandler<UiEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(&kind) = self.ids.get(&id) else { return };
+        tracing::trace!("{kind:?}: {event:?}");
         match &event {
             WindowEvent::RedrawRequested => {
                 self.paint(event_loop, kind);

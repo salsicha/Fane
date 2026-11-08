@@ -107,8 +107,26 @@ impl GlWindow {
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
         self.egui.paint(&self.window);
+        if let Some(dir) = std::env::var_os("FANE_DEBUG_SNAPSHOT") {
+            self.save_frame(std::path::Path::new(&dir));
+        }
         if let Err(e) = self.surface.swap_buffers(&self.context) {
             tracing::warn!("swap_buffers failed: {e}");
+        }
+    }
+
+    /// Debugging aid: write what was just rendered to `<dir>/<window title>.png`.
+    fn save_frame(&self, dir: &std::path::Path) {
+        use glow::HasContext as _;
+        let (w, h): (u32, u32) = self.window.inner_size().into();
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        // SAFETY: the context is current and `px` holds exactly w*h RGBA pixels.
+        unsafe {
+            self.gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut px)));
+        }
+        if let Some(img) = image::RgbaImage::from_raw(w, h, px) {
+            let img = image::imageops::flip_vertical(&img);
+            let _ = img.save(dir.join(format!("{}.png", self.window.title())));
         }
     }
 

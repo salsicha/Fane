@@ -88,6 +88,8 @@ pub struct Core {
     mail_error: Mutex<Option<String>>,
     ui: OnceLock<Arc<dyn UiSink>>,
     clipboard: Arc<Mutex<Option<arboard::Clipboard>>>,
+    /// Lets UI-thread callers start work on the runtime.
+    rt: tokio::runtime::Handle,
     me: Weak<Core>,
 }
 
@@ -132,6 +134,7 @@ impl Core {
             mail_error: Mutex::new(None),
             ui: OnceLock::new(),
             clipboard: Arc::new(Mutex::new(None)),
+            rt: tokio::runtime::Handle::current(),
             me: me.clone(),
         })
     }
@@ -157,6 +160,17 @@ impl Core {
     // --- lifecycle -----------------------------------------------------------------
     pub async fn start(self: &Arc<Self>, ui: Arc<dyn UiSink>) {
         let _ = self.ui.set(ui);
+        let me = self.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = crate::ipc::serve(move |req| {
+                let me = me.clone();
+                async move { me.handle_ipc(req).await }
+            })
+            .await
+            {
+                tracing::error!("cannot listen for `fane` commands: {e}");
+            }
+        });
         let llms = if Arc::ptr_eq(&self.llm, &self.suggest_llm) {
             vec![self.llm.clone()]
         } else {
@@ -181,18 +195,7 @@ impl Core {
         self.setup_mail().await;
         self.ready.store(true, Ordering::SeqCst);
         let me = self.clone();
-        tokio::spawn(async move { me.suggest_loop().await });
-        let me = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::ipc::serve(move |req| {
-                let me = me.clone();
-                async move { me.handle_ipc(req).await }
-            })
-            .await
-            {
-                tracing::error!("cannot listen for `fane` commands: {e}");
-            }
-        });
+        self.rt.spawn(async move { me.suggest_loop().await });
     }
 
     pub async fn shutdown(&self) {
@@ -321,7 +324,7 @@ impl Core {
             Some(m) => {
                 if let Some(prev) = previous {
                     let me = self.arc();
-                    tokio::spawn(async move {
+                    self.rt.spawn(async move {
                         tokio::time::sleep(Duration::from_millis(600)).await;
                         let _ = me.with_clipboard(move |c| c.set_text(prev)).await;
                     });
@@ -357,7 +360,7 @@ impl Core {
     pub fn open_palette(self: &Arc<Self>, prefill: String, submit: bool, answer: Option<String>) {
         self.busy.store(true, Ordering::SeqCst); // don't pop suggestions while the user is typing
         let me = self.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             let snap = me.prepare_palette().await;
             me.ui(UiEvent::PaletteReady { snap: Box::new(snap), prefill, submit, answer });
         });
@@ -374,7 +377,7 @@ impl Core {
 
     pub fn suggestion_feedback(self: &Arc<Self>, event: Feedback) {
         let me = self.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             let mut s = me.suggester.lock().await;
             match event {
                 Feedback::Accepted => s.accepted(),
@@ -424,7 +427,7 @@ impl Core {
     pub fn ask(self: &Arc<Self>, prompt: String, snap: Option<Snapshot>) -> u64 {
         let job = self.job_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let me = self.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             me.agent_running.store(true, Ordering::SeqCst);
             let snap = match snap.or_else(|| me.last_snapshot.lock().unwrap().clone()) {
                 Some(s) => s,
@@ -606,7 +609,7 @@ impl Core {
             "mail_use" => {
                 let me = self.clone();
                 let address = arg("address");
-                tokio::spawn(async move {
+                self.rt.spawn(async move {
                     match me.select_mail_account(&address).await {
                         Ok(m) | Err(m) => me.notify(m),
                     }
@@ -614,12 +617,12 @@ impl Core {
             }
             "mail_reload" => {
                 let me = self.clone();
-                tokio::spawn(async move { me.reload_mail_config().await });
+                self.rt.spawn(async move { me.reload_mail_config().await });
             }
             "ollama_use" => {
                 let me = self.clone();
                 let host = arg("host");
-                tokio::spawn(async move {
+                self.rt.spawn(async move {
                     if let Err(e) = me.use_ollama(&host).await {
                         me.notify(e);
                     }
