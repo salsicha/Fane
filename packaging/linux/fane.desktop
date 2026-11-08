@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Fane
+GenericName=Desktop assistant
+Comment=Unobtrusive local desktop assistant
+Exec=fane run
+Icon=fane
+Terminal=false
+Categories=Utility;
+Keywords=assistant;ai;ollama;llm;
+StartupWMClass=Fane
+StartupNotify=false

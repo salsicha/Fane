@@ -1,4 +1,4 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 //! Fane: an unobtrusive, context-aware desktop assistant backed by a local model.
 

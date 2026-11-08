@@ -1,0 +1,126 @@
+name: Release
+
+# Push a tag like v0.2.0 to build every package, create the GitHub release and publish the
+# apt repository on GitHub Pages. Run it by hand to just build the packages (as artifacts).
+#
+# One-time setup for the apt repository:
+#   - Settings → Pages → Source: GitHub Actions
+#   - Settings → Secrets → Actions: APT_SIGNING_KEY (an ASCII-armored private GPG key used only
+#     for this repository) and, if the key has one, APT_SIGNING_PASSPHRASE.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deb:
+    name: deb (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - run: cargo build --release --locked
+      - run: cargo deb --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: target/debian/*.deb
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: packaging/macos/build-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          New-Item -ItemType Directory -Force dist | Out-Null
+          # fane.exe is a GUI-subsystem program, so wait for it explicitly.
+          Start-Process -FilePath target\release\fane.exe -ArgumentList 'render-icon','packaging\windows\fane.ico','256' -Wait -NoNewWindow
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+            $env:PATH += ";${env:ProgramFiles(x86)}\NSIS"
+          }
+          makensis /DVERSION=$version packaging\windows\fane.nsi
+          Compress-Archive -Path target\release\fane.exe -DestinationPath "dist\Fane-$version-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  publish:
+    needs: [deb, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --title "Fane $GITHUB_REF_NAME" --generate-notes
+      - name: Build the apt repository
+        id: apt
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+        run: |
+          if [ -z "$APT_SIGNING_KEY" ]; then
+            echo "::warning::APT_SIGNING_KEY is not set; skipping the apt repository"
+            exit 0
+          fi
+          export GNUPGHOME=$(mktemp -d)
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+          export GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          mkdir debs && cp artifacts/*.deb debs/
+          REPO_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}" packaging/apt/make-repo.sh debs site
+          echo "built=true" >> "$GITHUB_OUTPUT"
+      - if: steps.apt.outputs.built == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - if: steps.apt.outputs.built == 'true'
+        id: pages
+        uses: actions/deploy-pages@v4

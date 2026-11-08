@@ -1,0 +1,5 @@
+# Optional: let the logged-in user write to /dev/uinput so Fane can press Ctrl+V for you on
+# Wayland. This also lets any program running as that user synthesize keyboard input.
+#   sudo cp /usr/share/doc/fane/examples/70-fane-uinput.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

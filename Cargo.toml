@@ -1,7 +1,12 @@
 [package]
 name = "fane"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Unobtrusive, context-aware desktop assistant backed by a local vision model"
+authors = ["Alex Moran <salsicha@gmail.com>"]
+homepage = "https://github.com/salsicha/Fane"
+repository = "https://github.com/salsicha/Fane"
+readme = "README.md"
 
 [dependencies]
 ab_glyph = "0.2.32"
@@ -23,7 +28,7 @@ futures = "0.3.34"
 glutin = "0.32.3"
 glutin-winit = "0.5.0"
 if-addrs = "0.15.0"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "ico"] }
 imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
 interprocess = { version = "2.4.7", features = ["tokio"] }
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder", "hostname"] }
@@ -66,3 +71,33 @@ ashpd = { version = "0.14.0", default-features = false, features = ["tokio", "sc
 ksni = "0.3.7"
 libc = "0.2.191"
 zbus = { version = "6.2.1", default-features = false, features = ["tokio"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# `cargo deb` (Linux .deb). Library dependencies come from dpkg-shlibdeps ($auto); the X11,
+# Wayland and GL libraries are loaded at runtime, so they're listed explicitly.
+[package.metadata.deb]
+maintainer = "Alex Moran <salsicha@gmail.com>"
+copyright = "2026, Alex Moran"
+section = "utils"
+priority = "optional"
+extended-description = """\
+Fane watches your screen and, when it has a specific and useful idea, shows a small card \
+with a ready-to-run prompt. Press a hotkey to ask for anything; drafts and rewrites are \
+pasted at your cursor. It runs on a local vision model served by Ollama, can use Ollama on \
+another computer on your network, talks to your notes, Thunderbird mail and MCP servers, \
+and hands coding tasks to Claude Code or Codex."""
+depends = "$auto, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libwayland-client0, libwayland-egl1"
+recommends = "gnome-shell-extension-appindicator"
+suggests = "ydotool, xdotool, wmctrl"
+assets = [
+    ["target/release/fane", "usr/bin/", "755"],
+    ["packaging/linux/fane.desktop", "usr/share/applications/", "644"],
+    ["assets/fane.svg", "usr/share/icons/hicolor/scalable/apps/fane.svg", "644"],
+    ["gnome-extension/fane-helper@salsicha.github.io/*", "usr/share/gnome-shell/extensions/fane-helper@salsicha.github.io/", "644"],
+    ["packaging/linux/70-fane-uinput.rules", "usr/share/doc/fane/examples/", "644"],
+    ["assets/fonts/LICENSE-DejaVu.txt", "usr/share/doc/fane/", "644"],
+    ["README.md", "usr/share/doc/fane/", "644"],
+]
