@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use interprocess::local_socket::{ListenerOptions, Name, Stream, prelude::*};
 use serde_json::{Value, json};
 
+#[cfg(unix)]
 use crate::config::RUNTIME_DIR;
 
 fn name() -> std::io::Result<Name<'static>> {

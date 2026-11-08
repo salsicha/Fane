@@ -134,10 +134,11 @@ mod imp {
                 let _ = p.send_event(UiEvent::TrayMenu(e.id().0.clone()));
             }));
             TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-                if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-                    if cfg!(target_os = "windows") {
-                        let _ = proxy.send_event(UiEvent::TrayMenu("ask".into()));
-                    }
+                // Windows convention: left-click opens the app; the menu is on right-click.
+                if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e
+                    && cfg!(target_os = "windows")
+                {
+                    let _ = proxy.send_event(UiEvent::TrayMenu("ask".into()));
                 }
             }));
             let img = crate::ui::icon::rgba(64);

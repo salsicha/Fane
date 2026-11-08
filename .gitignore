@@ -6,3 +6,4 @@ build/
 *.egg-info/
 /target
 /dist
+/.claude/worktrees/

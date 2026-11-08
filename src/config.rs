@@ -21,6 +21,7 @@ pub static STATE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     dirs::state_dir().or_else(dirs::data_local_dir).unwrap_or_else(|| home().join(".local/state")).join("fane")
 });
 /// Private per-session scratch space (screenshots, the IPC socket).
+#[cfg_attr(windows, allow(dead_code))]
 pub static RUNTIME_DIR: LazyLock<PathBuf> =
     LazyLock::new(|| dirs::runtime_dir().unwrap_or_else(|| std::env::temp_dir().join(format!("fane-{}", whoami()))));
 

@@ -53,6 +53,7 @@ impl OnlineAccounts {
         self.tokens.lock().unwrap().remove(&acc.path);
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn cached_token(&self, acc: &GoaAccount) -> Option<String> {
         let tokens = self.tokens.lock().unwrap();
         let (token, expiry) = tokens.get(&acc.path)?;

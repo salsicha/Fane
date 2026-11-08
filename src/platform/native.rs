@@ -114,6 +114,7 @@ fn new_enigo(prompt_for_permission: bool) -> Result<enigo::Enigo, enigo::NewConE
 }
 
 /// Ways this machine can synthesize the paste shortcut, best first.
+#[allow(dead_code)] // only `fane doctor` on Linux lists them
 pub fn paste_methods() -> Vec<&'static str> {
     vec!["enigo"]
 }

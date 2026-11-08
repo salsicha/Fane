@@ -46,15 +46,12 @@ enum Origin {
 pub fn run(core: Arc<Core>, rt: tokio::runtime::Handle) -> anyhow::Result<()> {
     #[allow(unused_mut)]
     let mut builder = EventLoop::<UiEvent>::with_user_event();
-    let mut x11 = false;
+    // Prefer XWayland: it lets the overlay sit in a screen corner and stay on top.
+    let x11 = cfg!(target_os = "linux") && std::env::var_os("DISPLAY").is_some();
     #[cfg(target_os = "linux")]
-    {
-        // Prefer XWayland: it lets the overlay sit in a screen corner and stay on top.
+    if x11 {
         use winit::platform::x11::EventLoopBuilderExtX11;
-        if std::env::var_os("DISPLAY").is_some() {
-            builder.with_x11();
-            x11 = true;
-        }
+        builder.with_x11();
     }
     let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
