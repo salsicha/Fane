@@ -89,7 +89,7 @@ with a ready-to-run prompt. Press a hotkey to ask for anything; drafts and rewri
 pasted at your cursor. It runs on a local vision model served by Ollama, can use Ollama on \
 another computer on your network, talks to your notes, Thunderbird mail and MCP servers, \
 and hands coding tasks to Claude Code or Codex."""
-depends = "$auto, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libwayland-client0, libwayland-egl1"
+depends = "$auto, ca-certificates, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libwayland-client0, libwayland-egl1"
 recommends = "gnome-shell-extension-appindicator"
 suggests = "ydotool, xdotool, wmctrl"
 assets = [
@@ -100,4 +100,8 @@ assets = [
     ["packaging/linux/70-fane-uinput.rules", "usr/share/doc/fane/examples/", "644"],
     ["assets/fonts/LICENSE-DejaVu.txt", "usr/share/doc/fane/", "644"],
     ["README.md", "usr/share/doc/fane/", "644"],
+    # CodeGem with its own Python; build it first with packaging/codegem/bundle.sh target/codegem
+    ["target/codegem/python/bin/*", "usr/lib/fane/codegem/python/bin/", "755"],
+    ["target/codegem/python/lib/**/*", "usr/lib/fane/codegem/python/lib/", "644"],
+    ["target/codegem/README", "usr/lib/fane/codegem/README", "644"],
 ]

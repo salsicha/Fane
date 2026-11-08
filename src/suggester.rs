@@ -40,7 +40,7 @@ fn prompt(window: &str, history: &str, recent: &str) -> String {
 2. In `suggestions`, propose AT MOST ONE thing the assistant could do immediately that would
    clearly help with that exact activity. The assistant can: read the user's notes and email,
    draft or rewrite text and insert it at the cursor, summarize what's on screen, look things
-   up in open apps, and hand coding work to Claude Code or Codex.
+   up in open apps, and hand coding work to a coding agent.
    - `title`: 2-6 words shown on a small card, e.g. \"Draft a reply to Dana\".
    - `prompt`: a self-contained instruction the assistant will execute, written as the
      user would type it, mentioning concrete names/details visible on screen.

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, ToolModes};
 use crate::config::{Config, RECOMMENDED_MODELS, STATE_DIR};
+use crate::evals::harness::{self, HarnessRecord, paired_harness};
 use crate::evals::scenarios::{AgentTask, Delegation, Mocks, SUGGEST_CASES, SuggestCase, agent_tasks};
 use crate::evals::scenes::{scene, scenes};
 use crate::llm::{LlmResult, Ollama, find_installed, truncate};
@@ -33,6 +34,8 @@ pub struct EvalOptions {
     pub timeout_s: f64,
     /// Output directory (default `STATE_DIR/evals/<YYYYmmdd-HHMMSS>`).
     pub out: Option<PathBuf>,
+    /// Also give each model's paired coding harness a real failing-test task.
+    pub harness: bool,
 }
 
 // --- Python-compatible number formatting ---------------------------------------------
@@ -251,6 +254,8 @@ pub struct ModelReport {
     pub tool_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Summary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<HarnessRecord>,
 }
 
 impl ModelReport {
@@ -318,6 +323,7 @@ pub struct EvalRunner {
     select: Option<String>,
     timeout: Duration,
     min_conf: f64,
+    harness: bool,
 }
 
 impl EvalRunner {
@@ -329,6 +335,7 @@ impl EvalRunner {
             repeat: opts.repeat.max(1),
             only: opts.only.clone(),
             select: opts.filter.clone(),
+            harness: opts.harness || opts.only.as_deref() == Some("harness"),
             timeout: Duration::from_secs_f64(timeout),
         }
     }
@@ -414,6 +421,24 @@ impl EvalRunner {
             }
             let used: BTreeSet<&str> = report.agent.iter().filter_map(|a| a.mode.as_deref()).collect();
             report.tool_mode = Some(used.into_iter().collect::<Vec<_>>().join("/"));
+        }
+        if self.harness {
+            let name = paired_harness(resolved, &self.cfg);
+            println!("  harness {name}: fixing a failing test…");
+            let r = harness::run_task(&self.cfg, &name, resolved, &llm.host(), self.timeout).await;
+            let verdict = if !r.available {
+                "not installed".to_string()
+            } else {
+                format!(
+                    "{}  fixed {}  test untouched {}  explained {}",
+                    if r.passed() { "PASS" } else { "FAIL" },
+                    mark(Some(r.fixed)),
+                    mark(Some(r.test_untouched)),
+                    mark(Some(r.explained))
+                )
+            };
+            println!("  harness {name:<16} {verdict}  {:>6}s", pyf(r.latency_s));
+            report.harness = Some(r);
         }
         Ok(())
     }
@@ -803,6 +828,40 @@ pub fn to_markdown(res: &EvalResults) -> String {
         String::new(),
         "U/u = understood the screen or not; ✓/✗ = suggested (or stayed quiet) as expected.".into(),
     ]);
+
+    let harnessed: Vec<&&ModelReport> = ok.iter().filter(|m| m.harness.is_some()).collect();
+    if !harnessed.is_empty() {
+        lines.extend([
+            String::new(),
+            "## Coding harness".into(),
+            String::new(),
+            "Each model's paired harness got a small project whose test fails with a KeyError and was asked to \
+             fix it; Fane then ran the tests itself."
+                .into(),
+            String::new(),
+            "| model | harness | test fixed | test file untouched | names the fix | time (s) | note |".into(),
+            "|---|---|---|---|---|---|---|".into(),
+        ]);
+        for m in harnessed {
+            let h = m.harness.as_ref().unwrap();
+            let yn = |b: bool| if b { "✓" } else { "✗" };
+            let note = h.error.clone().unwrap_or_default().replace('|', "/");
+            if h.available {
+                lines.push(format!(
+                    "| {} | {} | {} | {} | {} | {} | {} |",
+                    m.name(),
+                    h.harness,
+                    yn(h.fixed),
+                    yn(h.test_untouched),
+                    yn(h.explained),
+                    pyf(h.latency_s),
+                    truncate(&note, 120)
+                ));
+            } else {
+                lines.push(format!("| {} | {} | – | – | – | – | not installed |", m.name(), h.harness));
+            }
+        }
+    }
 
     lines.extend([String::new(), "## Failures".into(), String::new()]);
     let mut any_fail = false;

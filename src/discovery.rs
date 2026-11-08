@@ -142,7 +142,7 @@ async fn port_open(host: IpAddr, port: u16, timeout: Duration) -> bool {
 }
 
 fn client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder().timeout(timeout).build().expect("HTTP client")
+    crate::llm::http_client(timeout)
 }
 
 /// Ask `url` for its Ollama version and models. Errors if it isn't an Ollama server.

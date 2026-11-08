@@ -114,9 +114,13 @@ struct EvalArgs {
     /// Run each case N times
     #[arg(long, default_value_t = 1)]
     repeat: usize,
-    /// Run one half of the suite
-    #[arg(long, value_parser = ["suggest", "agent"])]
+    /// Run one part of the suite
+    #[arg(long, value_parser = ["suggest", "agent", "harness"])]
     only: Option<String>,
+    /// Also have each model's paired coding harness (CodeGem, Qwen Code, SuperQode DeepSeek) fix a
+    /// failing test
+    #[arg(long)]
+    harness: bool,
     /// Only cases whose name contains this
     #[arg(long)]
     filter: Option<String>,
@@ -431,8 +435,14 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
         for (good, text) in crate::platform::doctor_checks() {
             println!("{} {text}", ok(good));
         }
-        for tool in ["claude", "codex"] {
-            println!("{} {tool} CLI for delegation", ok(which::which(tool).is_ok()));
+        for (i, (name, agent)) in cfg.delegate.all_agents().iter().enumerate() {
+            let first = agent.cmd.first().map(String::as_str).unwrap_or("?");
+            let on_path = which::which(first).is_ok();
+            let bundled = !on_path && crate::connectors::delegate::bundled(first).is_some();
+            let installed = on_path || bundled;
+            let default = if i == 0 { ", default" } else { "" };
+            let program = if bundled { format!("{first}, bundled with Fane") } else { first.to_string() };
+            println!("{} delegate to {name} ({program}{default})", ok(installed));
         }
         let mail = &cfg.agent_mail.account;
         println!(
@@ -490,6 +500,7 @@ fn cmd_eval(args: EvalArgs) -> anyhow::Result<i32> {
         filter: args.filter,
         timeout_s: args.timeout,
         out: args.out,
+        harness: args.harness,
     };
     runtime().block_on(run(cfg, opts))
 }

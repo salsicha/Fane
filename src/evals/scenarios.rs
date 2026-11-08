@@ -98,6 +98,17 @@ static FAILURE_TASK: LazyLock<Regex> =
 static BUSY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bno\b|not free|busy|design review|conflict|booked").unwrap());
 
+/// The harnesses the mock `delegate` tool offers (the default pairing first).
+pub fn mock_agents() -> Vec<(String, String)> {
+    [
+        ("codegem", "CodeGem (SuperQode), a coding agent running on the local model"),
+        ("claude", "Claude Code (the user's Claude subscription)"),
+    ]
+    .iter()
+    .map(|(n, d)| (n.to_string(), d.to_string()))
+    .collect()
+}
+
 /// One recorded call of the mock `delegate` tool.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Delegation {
@@ -193,7 +204,7 @@ impl Mocks {
             let del = del.clone();
             async move {
                 let d = Delegation { agent: a.str("agent"), task: a.str("task"), cwd: a.str("cwd") };
-                let who = if d.agent.is_empty() { "claude".to_string() } else { d.agent.clone() };
+                let who = if d.agent.is_empty() { "codegem".to_string() } else { d.agent.clone() };
                 del.lock().unwrap().push(d);
                 Ok(json!(format!("{who}: replaced request.json['user_id'] with session['uid']; 12 tests pass.")))
             }
@@ -209,7 +220,7 @@ impl Mocks {
             delegate,
         };
         let mut reg = ToolRegistry::new();
-        for tool in builtin_tools(handlers, &["claude".to_string(), "codex".to_string()]) {
+        for tool in builtin_tools(handlers, &mock_agents()) {
             reg.add(tool);
         }
         // Stands in for a tool coming from a calendar MCP server.

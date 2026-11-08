@@ -8,10 +8,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Recommended local vision models (Ollama tags), in default preference order.
+/// The recommended deployments: a local model and the coding harness it delegates to.
+pub const PAIRINGS: [(&str, &str); 3] =
+    [("gemma4:26b", "codegem"), ("qwen3.8:27b", "qwen"), ("openbmb/minicpm-v4.7:35b-a3b", "deepseek")];
+
+/// Each is paired with a coding harness for delegation (see `PAIRINGS`).
 pub const RECOMMENDED_MODELS: [&str; 3] = [
-    "openbmb/minicpm-v4.7:35b-a3b", // MiniCPM-V 4.7 35B MoE (3B active), JSON tool calls
-    "gemma4:31b",                   // Gemma 4 31B, dense, native tools
-    "qwen3.8:27b",                  // Qwen 3.8 27B, dense, native tools
+    "gemma4:26b",                   // Gemma 4 26B, native tools; harness: CodeGem
+    "qwen3.8:27b",                  // Qwen 3.8 27B, native tools; harness: Qwen Code
+    "openbmb/minicpm-v4.7:35b-a3b", // MiniCPM-V 4.7 35B MoE (3B active), harness: SuperQode DeepSeek (ds4-coding)
 ];
 
 pub static CONFIG_DIR: LazyLock<PathBuf> =
@@ -88,7 +93,7 @@ impl Default for ModelCfg {
     fn default() -> Self {
         let mut fallbacks: Vec<String> = RECOMMENDED_MODELS.iter().map(|s| s.to_string()).collect();
         fallbacks.extend(
-            ["minicpm-v4.7", "gemma4", "qwen3.8", "qwen3-vl", "minicpm-v", "qwen2.5vl", "llava"].map(String::from),
+            ["gemma4", "qwen3.8", "minicpm-v4.7", "qwen3-vl", "minicpm-v", "qwen2.5vl", "llava"].map(String::from),
         );
         Self {
             host: "http://127.0.0.1:11434".into(),
@@ -226,19 +231,154 @@ impl Default for ConnectorsCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DelegateCfg {
-    pub claude_cmd: Vec<String>,
-    pub codex_cmd: Vec<String>,
+    /// The coding harness offered to the model first.
+    pub default: String,
     pub timeout: u64,
     pub cwd: String,
+    /// Harnesses added to (or replacing) the built-in ones, by name.
+    pub agents: BTreeMap<String, AgentCfg>,
+    /// Older configs set these; they override the `claude` / `codex` commands.
+    #[serde(skip_serializing)]
+    pub claude_cmd: Vec<String>,
+    #[serde(skip_serializing)]
+    pub codex_cmd: Vec<String>,
+}
+
+/// A command-line coding agent Fane can hand tasks to. In `cmd` and `env`, `{task}`,
+/// `{model}` (Fane's current Ollama model, or `model` if set), `{ollama_host}` and `{cwd}`
+/// are filled in; without a `{task}` argument the task is appended last.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentCfg {
+    pub cmd: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    /// Shown to the model when it picks a harness.
+    pub description: String,
+    /// Use this Ollama model instead of Fane's own.
+    pub model: String,
+}
+
+fn agent(cmd: &[&str], env: &[(&str, &str)], description: &str) -> AgentCfg {
+    AgentCfg {
+        cmd: cmd.iter().map(|s| s.to_string()).collect(),
+        env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        description: description.into(),
+        model: String::new(),
+    }
+}
+
+/// The harnesses Fane knows about, in preference order. The local ones run on the same Ollama
+/// model and server as Fane; Claude Code and Codex use their own sign-in (your subscription).
+pub fn builtin_agents() -> Vec<(&'static str, AgentCfg)> {
+    let ollama = [("OLLAMA_HOST", "{ollama_host}")];
+    vec![
+        (
+            "codegem",
+            agent(
+                &[
+                    "superqode",
+                    "harness",
+                    "run",
+                    "codegem",
+                    "{task}",
+                    "--provider",
+                    "ollama",
+                    "--model",
+                    "{model}",
+                    "--working-dir",
+                    "{cwd}",
+                ],
+                &ollama,
+                "CodeGem (SuperQode), a coding agent running on the local model",
+            ),
+        ),
+        (
+            "qwen",
+            agent(
+                &[
+                    "qwen",
+                    "--auth-type",
+                    "openai",
+                    "--openai-base-url",
+                    "{ollama_host}/v1",
+                    "--openai-api-key",
+                    "ollama",
+                    "-m",
+                    "{model}",
+                    "{task}",
+                ],
+                &[],
+                "Qwen Code, a coding agent running on the local model",
+            ),
+        ),
+        (
+            "deepseek",
+            agent(
+                &[
+                    "superqode",
+                    "harness",
+                    "run",
+                    "ds4-coding",
+                    "{task}",
+                    "--provider",
+                    "ollama",
+                    "--model",
+                    "{model}",
+                    "--working-dir",
+                    "{cwd}",
+                ],
+                &ollama,
+                "SuperQode's DeepSeek (ds4-coding) harness, a coding agent running on the local model",
+            ),
+        ),
+        ("claude", agent(&["claude", "-p", "{task}"], &[], "Claude Code (the user's Claude subscription)")),
+        ("codex", agent(&["codex", "exec", "{task}"], &[], "Codex (the user's ChatGPT plan)")),
+    ]
+}
+
+impl DelegateCfg {
+    /// Every configured harness, the default first, then built-ins, then user-added ones.
+    pub fn all_agents(&self) -> Vec<(String, AgentCfg)> {
+        let mut list: Vec<(String, AgentCfg)> = builtin_agents().into_iter().map(|(n, a)| (n.to_string(), a)).collect();
+        for (name, legacy) in [("claude", &self.claude_cmd), ("codex", &self.codex_cmd)] {
+            if !legacy.is_empty()
+                && let Some((_, a)) = list.iter_mut().find(|(n, _)| n == name)
+            {
+                a.cmd = legacy.clone();
+            }
+        }
+        for (name, user) in &self.agents {
+            match list.iter_mut().find(|(n, _)| n == name) {
+                Some((_, a)) => {
+                    if !user.cmd.is_empty() {
+                        a.cmd = user.cmd.clone();
+                    }
+                    a.env.extend(user.env.clone());
+                    if !user.description.is_empty() {
+                        a.description = user.description.clone();
+                    }
+                    a.model = user.model.clone();
+                }
+                None => list.push((name.clone(), user.clone())),
+            }
+        }
+        if let Some(i) = list.iter().position(|(n, _)| *n == self.default) {
+            let d = list.remove(i);
+            list.insert(0, d);
+        }
+        list
+    }
 }
 
 impl Default for DelegateCfg {
     fn default() -> Self {
         Self {
-            claude_cmd: vec!["claude".into(), "-p".into()],
-            codex_cmd: vec!["codex".into(), "exec".into()],
+            default: "codegem".into(),
             timeout: 900,
             cwd: "~".into(),
+            agents: BTreeMap::new(),
+            claude_cmd: vec![],
+            codex_cmd: vec![],
         }
     }
 }
@@ -313,7 +453,7 @@ pub fn default_template() -> String {
 # (see src/config.rs in the Fane repository for the full list).
 
 [model]
-# Recommended: "openbmb/minicpm-v4.7:35b-a3b", "gemma4:31b", "qwen3.8:27b".
+# Recommended: "gemma4:26b", "qwen3.8:27b", "openbmb/minicpm-v4.7:35b-a3b".
 # Compare them on this machine with `fane eval`.
 name = "{name}"
 # suggest_name = ""   # optional separate model for suggestions
@@ -334,6 +474,11 @@ binding = "{binding}"
 
 [connectors]
 notes_dirs = ["~/Notes", "~/Documents/Notes"]
+
+[delegate]
+# Coding agent for hard tasks: codegem (pairs with gemma4), qwen (Qwen Code, pairs with
+# qwen3.8), deepseek (SuperQode's DeepSeek harness, pairs with MiniCPM), claude or codex.
+default = "codegem"
 
 [agent_mail]
 # account = "my-assistant@gmail.com"   # must be in GNOME Settings → Online Accounts
@@ -452,6 +597,23 @@ mod tests {
         assert_eq!(cfg.agent_mail.poll_seconds, 9);
         assert_eq!(cfg.model.host, "http://h:1");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delegate_agents_merge_and_order() {
+        let cfg: Config = toml::from_str(
+            "[delegate]\ndefault = \"qwen\"\nclaude_cmd = [\"claude\", \"--x\"]\n\
+             [delegate.agents.qwen]\nmodel = \"qwen3.8:27b\"\n\
+             [delegate.agents.aider]\ncmd = [\"aider\", \"--message\", \"{task}\"]\n",
+        )
+        .unwrap();
+        let agents = cfg.delegate.all_agents();
+        let names: Vec<&str> = agents.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["qwen", "codegem", "deepseek", "claude", "codex", "aider"]);
+        assert_eq!(agents[0].1.model, "qwen3.8:27b");
+        assert!(agents[0].1.cmd.contains(&"{task}".to_string()));
+        assert_eq!(agents[3].1.cmd, ["claude", "--x"]);
+        assert_eq!(Config::default().delegate.all_agents()[0].0, "codegem");
     }
 
     #[test]

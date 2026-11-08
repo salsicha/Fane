@@ -18,8 +18,9 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
   app that has an MCP server (Gmail, calendars, Slack, Obsidian, the filesystem and so on).
 - **Has its own email** (Linux). Give it a Gmail account through GNOME Online Accounts. You
   can email it tasks from your own address, and it replies. Mail from anyone else is ignored.
-- **Delegates the hard stuff.** Coding and long multi-step tasks go to Claude Code or Codex,
-  using your own subscription through their command-line tools.
+- **Delegates the hard stuff.** Coding and long multi-step tasks go to a command-line coding
+  agent: CodeGem or Qwen Code on the same local model, or Claude Code and Codex on your own
+  subscription.
 - **Stays out of the way.** It only re-reads the screen when something changed, suggests at
   most one thing at a time, and backs off further each time you dismiss a suggestion. It
   never looks at password managers or private browser windows.
@@ -27,7 +28,8 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
 ## Install
 
 You also need [Ollama](https://ollama.com/download) with one of the
-[recommended models](#recommended-models), e.g. `ollama pull openbmb/minicpm-v4.7:35b-a3b`.
+[recommended models](#recommended-models), e.g. `ollama pull gemma4:26b`, and optionally its
+[coding agent](#coding-agents).
 
 ### Ubuntu 24.04+ (apt)
 
@@ -77,7 +79,7 @@ cargo install --path .        # puts `fane` in ~/.cargo/bin
 ```
 
 No system libraries are needed to build on Linux: Fane loads X11, Wayland and OpenGL at
-runtime.
+runtime. A source install doesn't include CodeGem; install it with `uv tool install superqode`.
 
 ## Using it
 
@@ -93,7 +95,7 @@ runtime.
 
 Example requests: *"reply to this saying Thursday works"*, *"what did Dana email me about
 the review?"*, *"find my notes on the Q3 plan and summarize them"*, *"fix the failing test
-in ~/code/api"* (which gets delegated to Claude Code or Codex).
+in ~/code/api"* (which gets delegated to a [coding agent](#coding-agents)).
 
 ## Settings
 
@@ -159,46 +161,95 @@ enough. Other commands: `fane mail accounts`, `fane mail off` and `fane mail sta
 On macOS and Windows there's no equivalent of Online Accounts that avoids storing a
 password, so Fane's own mailbox isn't available there yet. Everything else is.
 
-## Claude Code and Codex
-
-The `delegate` tool hands coding and long multi-step tasks to the
-[Claude Code](https://claude.com/claude-code) or
-[Codex](https://github.com/openai/codex) command-line tools, run non-interactively
-(`claude -p …`, `codex exec …`). They use whatever sign-in you've given them, so with
-`claude` logged in to your Claude subscription and `codex login` done with your ChatGPT
-plan, delegated tasks run on those subscriptions. Fane never sees either credential. If
-`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set in Fane's environment, the CLIs may use the
-API key instead. The commands are `[delegate] claude_cmd` / `codex_cmd` in the config.
-
 ## Recommended models
 
-| Model | Ollama tag | Size (Q4) | Architecture | Tool calling |
-| --- | --- | --- | --- | --- |
-| MiniCPM-V 4.7 35B (default) | `openbmb/minicpm-v4.7:35b-a3b` | ~22 GB | MoE, 3B active | JSON protocol* |
-| Gemma 4 31B | `gemma4:31b` | ~20 GB | dense | native |
-| Qwen 3.8 27B | `qwen3.8:27b` | ~18 GB | dense, thinking (Fane turns thinking off) | native |
+Fane is tuned for three pairings of a local vision model with a command-line coding agent
+("harness") that the model hands bigger coding tasks to:
 
-\* Ollama doesn't list tool support for MiniCPM-V 4.7, so Fane detects this and switches to
-asking for a JSON action instead. You can force either convention with `[model] tool_mode`.
+| | Model | Ollama tag | Size (Q4) | Tool calling | Coding harness |
+| --- | --- | --- | --- | --- | --- |
+| 1 (default) | Gemma 4 26B | `gemma4:26b` | ~18 GB | native | [CodeGem](https://shashikantjagtap.net/introducing-codegem-a-gemini-and-gemma-coding-harness-in-superqode/) (SuperQode) |
+| 2 | Qwen 3.8 27B | `qwen3.8:27b` | ~17 GB | native (Fane turns thinking off) | [Qwen Code](https://github.com/QwenLM/qwen-code) |
+| 3 | MiniCPM-V 4.7 35B (MoE, 3B active) | `openbmb/minicpm-v4.7:35b-a3b` | ~22 GB | native or JSON protocol* | SuperQode's DeepSeek harness (`ds4-coding`) |
 
-These models are newer than older Ollama releases, so if a pull or load fails, update Ollama
-first. MiniCPM-V 4.7 is the default because it scored best in `fane eval`, and Fane
-falls back through the list in order to whichever one you have installed. On a GPU with
-less than ~24 GB of memory, part of each model runs on the CPU. The dense models slow down
-the most when that happens, while MiniCPM's mixture-of-experts design only activates 3B
-parameters per token, so it should hold up better. The
-[evaluation](#evaluating-models) measures all of this on your hardware.
+\* Older Ollama releases don't support tool calls for MiniCPM-V 4.7, so Fane detects this and
+switches to asking for a JSON action instead. You can force either convention with
+`[model] tool_mode`.
 
-You can use a different model for the agent and keep MiniCPM for the background suggestions:
+On a Tesla V100 (32 GB), `fane eval --harness` gave all three pairings full marks on Fane's
+own tasks. Gemma 4 26B was the fastest (median agent task 2.9 s, 126 tokens/s, versus 3.1 s
+for MiniCPM and 5.6 s for Qwen 3.8), and each harness fixed the eval's failing test on its
+paired model: CodeGem in 18 s, the DeepSeek harness in 23 s and Qwen Code in 48 s.
+
+To use pairing 2 or 3, set the model and the harness:
 
 ```toml
 [model]
-name = "gemma4:31b"
+name = "qwen3.8:27b"
+
+[delegate]
+default = "qwen"            # or "deepseek" with MiniCPM
+```
+
+These models are newer than older Ollama releases, so if a pull or load fails, update Ollama
+first. If the configured model isn't installed, Fane falls back through the list in order
+to whichever one you have. On a GPU with less than ~24 GB of memory, part of each model runs
+on the CPU, which slows the dense models the most; MiniCPM's mixture-of-experts design only
+activates 3B parameters per token, so it should hold up better. The
+[evaluation](#evaluating-models) measures all of this on your hardware.
+
+You can use a different model just for the background suggestions:
+
+```toml
+[model]
+name = "gemma4:26b"
 suggest_name = "openbmb/minicpm-v4.7:35b-a3b"
 ```
 
 Both models only stay loaded at once if they fit in memory together. Otherwise Ollama
 swaps between them, which costs a reload every time.
+
+## Coding agents
+
+The `delegate` tool hands coding and long multi-step tasks to a command-line coding agent,
+run non-interactively in `[delegate] cwd` (your home folder by default). Fane offers the
+model every harness that's installed, with `[delegate] default` first:
+
+| Name | Install | Runs |
+| --- | --- | --- |
+| `codegem` (default) | Included with Fane's packages; or `uv tool install superqode` | `superqode harness run codegem "<task>" --provider ollama --model <model> --working-dir <dir>` |
+| `qwen` | `npm install -g @qwen-code/qwen-code` ([Qwen Code](https://github.com/QwenLM/qwen-code)) | `qwen --auth-type openai --openai-base-url <ollama>/v1 --openai-api-key ollama -m <model> "<task>"` |
+| `deepseek` | Included with Fane's packages (part of SuperQode) | `superqode harness run ds4-coding "<task>" --provider ollama --model <model> --working-dir <dir>` |
+| `claude` | [Claude Code](https://claude.com/claude-code) | `claude -p "<task>"` |
+| `codex` | [Codex](https://github.com/openai/codex) | `codex exec "<task>"` |
+
+The three local harnesses run on the same Ollama model and server as Fane (including a
+server you picked in Settings), so nothing leaves your network and the model doesn't have to
+be loaded twice. CodeGem and the DeepSeek harness both come from
+[SuperQode](https://pypi.org/project/superqode/) (Apache-2.0), which Fane's packages include
+with a private copy of Python; Fane uses that copy when `superqode` isn't on your PATH.
+(The npm package `run-deepseek-cli` was tried for pairing 3 but only talks to DeepSeek's
+cloud API, so it can't use a local model.)
+
+Claude Code and Codex use whatever sign-in you've given them, so with `claude` logged in to
+your Claude subscription and `codex login` done with your ChatGPT plan, delegated tasks run
+on those subscriptions. Fane never sees either credential. If `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY` is set in Fane's environment, the CLIs may use the API key instead.
+
+Every harness can be changed or added in the config. `{task}`, `{model}`, `{ollama_host}`
+and `{cwd}` are filled in; without a `{task}` argument the task goes last:
+
+```toml
+[delegate.agents.qwen]                  # let Qwen Code edit files on its own
+cmd = ["qwen", "--openai-base-url", "{ollama_host}/v1", "--openai-api-key", "ollama",
+       "-m", "{model}", "--approval-mode", "auto-edit", "{task}"]
+
+[delegate.agents.aider]                 # a harness Fane doesn't know about
+cmd = ["aider", "--model", "ollama_chat/{model}", "--yes", "--message", "{task}"]
+description = "Aider, editing files in the working directory"
+```
+
+`fane doctor` lists which harnesses are installed and which is the default.
 
 ## Evaluating models
 
@@ -220,6 +271,11 @@ fane eval --list               # show the cases
 | Agent tasks | Seven tasks scored on the tool trace: replying at the cursor without preamble, looking up email, opening and summarizing a note, reading an error off the screen, delegating a code fix, rewriting the clipboard, and answering from an MCP calendar tool. Unnecessary actions are penalized, such as delegating or inserting when the user only asked a question. |
 | Speed and fit | Median latency for suggestions and for agent tasks, tokens per second, tool calls and tokens per task, hidden reasoning (some models think even when asked not to, which is where the latency goes), how much of the model is on the GPU, and cold load time. |
 
+`fane eval --harness` (or `--only harness`) also gives each model's paired coding harness a
+small Python project whose test fails with a KeyError, asks it to fix the bug, and then runs
+the tests itself; it checks that the test passes and that the harness didn't edit the test.
+The harness gets permission to edit files in that throwaway project.
+
 Each run writes `report.md` (summary, per-case table, failures and a suggested `[model]`
 config), `results.json` (full transcripts) and the screenshots it used to
 `<state dir>/fane/evals/<time>/` (`~/.local/state` on Linux). The checks are simple keyword
@@ -234,7 +290,7 @@ and its default is listed in [`src/config.rs`](src/config.rs). The main ones:
 
 ```toml
 [model]
-name = "openbmb/minicpm-v4.7:35b-a3b"   # falls back to the other recommended/installed models
+name = "gemma4:26b"                     # falls back to the other recommended/installed models
 host = "http://127.0.0.1:11434"         # or pick one in Settings
 suggest_name = ""                       # optional faster model for proactive suggestions
 num_ctx = 8192                          # keeps more of the model on the GPU
@@ -253,6 +309,9 @@ binding = "<Control><Super>space" # Linux (GNOME syntax); e.g. "Cmd+Shift+Space"
 
 [connectors]
 notes_dirs = ["~/Notes", "~/Obsidian"]
+
+[delegate]
+default = "codegem"              # or qwen, deepseek, claude, codex (see Coding agents)
 
 [agent_mail]
 account = "my-assistant@gmail.com"  # from Settings → Online Accounts; empty = email off
@@ -325,8 +384,9 @@ pasting and the global hotkey.
   HTTP, and Ollama itself has no login, so anyone who can reach the port can use it. Only
   do this on a network you trust, or put the server behind a VPN like Tailscale (type its
   address by hand; the scan only covers your local subnets).
-- Claude Code and Codex run non-interactively with their default permission settings. To
-  give them more autonomy, change `[delegate] claude_cmd` / `codex_cmd`.
+- Coding agents run non-interactively with their default permission settings, in
+  `[delegate] cwd`. To give one more autonomy (e.g. Qwen Code's `--approval-mode auto-edit`),
+  change its command under `[delegate.agents.<name>]`.
 
 ## Development
 
@@ -344,7 +404,10 @@ a `v*` tag is pushed: `.deb` packages (amd64, arm64) with `cargo deb`, a univers
 `.dmg` ([`packaging/macos/`](packaging/macos/)), a Windows installer and zip
 ([`packaging/windows/`](packaging/windows/)), and the signed apt repository on GitHub Pages
 ([`packaging/apt/make-repo.sh`](packaging/apt/make-repo.sh)). The apt repository needs a
-one-time setup described at the top of that workflow.
+one-time setup described at the top of that workflow. Every package includes CodeGem, built by
+[`packaging/codegem/bundle.sh`](packaging/codegem/bundle.sh) (a pinned SuperQode on a
+relocatable CPython from python-build-standalone); to build a `.deb` locally, run
+`packaging/codegem/bundle.sh target/codegem` before `cargo deb`.
 
 ## Status and roadmap
 

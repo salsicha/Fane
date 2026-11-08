@@ -26,6 +26,19 @@ fn err(msg: impl Into<String>) -> LlmError {
     LlmError::Other(msg.into())
 }
 
+/// An HTTP client. If the system's CA certificates can't be loaded (a minimal install without
+/// `ca-certificates`), plain-HTTP Ollama still works and HTTPS fails with a clear error.
+pub fn http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder().timeout(timeout).build().unwrap_or_else(|e| {
+        tracing::warn!("system CA certificates unavailable ({e}); HTTPS servers won't be trusted");
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .tls_certs_only(std::iter::empty())
+            .build()
+            .expect("HTTP client without TLS roots")
+    })
+}
+
 /// Downscale and JPEG-encode an image for the model; returns base64.
 pub fn encode_image(img: &DynamicImage, max_side: u32) -> String {
     let longest = img.width().max(img.height()).max(1);
@@ -124,7 +137,7 @@ pub struct Ollama {
 
 impl Ollama {
     pub fn new(cfg: &ModelCfg) -> Self {
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(cfg.timeout)).build().expect("HTTP client");
+        let client = http_client(Duration::from_secs(cfg.timeout));
         Self {
             model: RwLock::new(cfg.name.clone()),
             cfg: RwLock::new(cfg.clone()),

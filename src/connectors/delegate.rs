@@ -1,56 +1,117 @@
-//! Hand hard tasks to Claude Code or Codex running non-interactively.
+//! Hand hard tasks to a command-line coding agent (CodeGem, Qwen Code, SuperQode's DeepSeek harness,
+//! Claude Code, Codex, or one you configure) running non-interactively.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::config::{DelegateCfg, expand};
+use crate::config::{AgentCfg, DelegateCfg, expand};
 
-const AGENTS: [&str; 2] = ["claude", "codex"];
+/// Fane's current Ollama model and server, for the `{model}` / `{ollama_host}` placeholders.
+#[derive(Debug, Clone, Default)]
+pub struct Vars {
+    pub model: String,
+    pub ollama_host: String,
+}
 
 pub struct Delegate {
     pub cfg: DelegateCfg,
+    agents: Vec<(String, AgentCfg)>,
+}
+
+/// Starts SuperQode's CLI from the bundled Python (no console-script shims, so the bundle can
+/// live anywhere).
+const SUPERQODE_LAUNCH: &str =
+    "import sys; from superqode.main import cli_main; sys.argv[0] = 'superqode'; sys.exit(cli_main())";
+
+/// CodeGem shipped inside Fane's package: the bundled Python and the arguments that start
+/// `superqode`. Looked for next to the executable (Windows), in `../lib/fane` (Linux packages),
+/// in `../Resources` (macOS app), and in `$FANE_BUNDLE_DIR`, as `codegem/` or `codegem-<arch>/`.
+pub fn bundled(program: &str) -> Option<(PathBuf, Vec<String>)> {
+    if program != "superqode" {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let mut roots: Vec<PathBuf> = std::env::var_os("FANE_BUNDLE_DIR").map(PathBuf::from).into_iter().collect();
+    roots.extend([dir.join("../lib/fane"), dir.join("../Resources"), dir.to_path_buf()]);
+    let names = ["codegem".to_string(), format!("codegem-{}", std::env::consts::ARCH)];
+    for root in &roots {
+        for name in &names {
+            let python = if cfg!(windows) {
+                root.join(name).join("python").join("python.exe")
+            } else {
+                root.join(name).join("python").join("bin").join("python3")
+            };
+            if python.is_file() {
+                return Some((python, vec!["-I".into(), "-c".into(), SUPERQODE_LAUNCH.into()]));
+            }
+        }
+    }
+    None
+}
+
+/// Where to find a harness's program: on PATH, else bundled with Fane. Returns the
+/// executable and any arguments that must come first.
+fn resolve(program: &str) -> Option<(PathBuf, Vec<String>)> {
+    which::which(program).ok().map(|p| (p, vec![])).or_else(|| bundled(program))
+}
+
+/// Fill in `{task}`, `{model}`, `{ollama_host}` and `{cwd}`.
+fn fill(template: &str, task: &str, model: &str, host: &str, cwd: &str) -> String {
+    template.replace("{model}", model).replace("{ollama_host}", host).replace("{cwd}", cwd).replace("{task}", task)
 }
 
 impl Delegate {
     pub fn new(cfg: DelegateCfg) -> Self {
-        Self { cfg }
+        let agents = cfg.all_agents();
+        Self { cfg, agents }
     }
 
-    fn cmd(&self, agent: &str) -> &[String] {
-        match agent {
-            "claude" => &self.cfg.claude_cmd,
-            _ => &self.cfg.codex_cmd,
-        }
+    fn agent(&self, name: &str) -> Option<&AgentCfg> {
+        self.agents.iter().find(|(n, _)| n == name).map(|(_, a)| a)
     }
 
-    /// "claude" / "codex" whose command is on PATH.
-    pub fn available(&self) -> Vec<String> {
-        AGENTS
+    /// (name, description) of the harnesses whose command is installed, default first.
+    pub fn available(&self) -> Vec<(String, String)> {
+        self.agents
             .iter()
-            .filter(|a| self.cmd(a).first().is_some_and(|c| which::which(c).is_ok()))
-            .map(|a| a.to_string())
+            .filter(|(_, a)| a.cmd.first().is_some_and(|c| resolve(c).is_some()))
+            .map(|(n, a)| (n.clone(), a.description.clone()))
             .collect()
     }
 
-    /// Runs the agent with `task` as the last argument; returns its (trimmed) output or "error: ...".
-    pub async fn run(&self, agent: &str, task: &str, cwd: &str) -> String {
+    /// Runs the harness on `task`; returns its (trimmed) output or "error: ...".
+    pub async fn run(&self, agent: &str, task: &str, cwd: &str, vars: &Vars) -> String {
         let agent = agent.trim().to_lowercase();
-        if !AGENTS.contains(&agent.as_str()) {
-            return "error: agent must be 'claude' or 'codex'".into();
-        }
-        let Some((program, args)) = self.cmd(&agent).split_first() else {
+        let Some(spec) = self.agent(&agent) else {
+            let names: Vec<&str> = self.agents.iter().map(|(n, _)| n.as_str()).collect();
+            return format!("error: unknown agent {agent:?} (configured: {})", names.join(", "));
+        };
+        let Some((program, args)) = spec.cmd.split_first() else {
             return format!("error: no command configured for {agent}");
         };
-        let Ok(program_path) = which::which(program) else {
+        let Some((program_path, prefix)) = resolve(program) else {
             return format!("error: {program} is not installed");
         };
         let workdir = expand(if cwd.trim().is_empty() { &self.cfg.cwd } else { cwd });
-        let mut child = match Command::new(program_path)
-            .args(args)
-            .arg(task)
+        let model = if spec.model.is_empty() { vars.model.as_str() } else { spec.model.as_str() };
+        let dir = workdir.display().to_string();
+        let fill = |t: &str| fill(t, task, model, &vars.ollama_host, &dir);
+        let mut argv: Vec<String> = prefix;
+        argv.extend(args.iter().map(|a| fill(a)));
+        if !spec.cmd.iter().any(|a| a.contains("{task}")) {
+            argv.push(task.to_string());
+        }
+        let mut cmd = Command::new(program_path);
+        cmd.args(&argv);
+        for (k, v) in &spec.env {
+            cmd.env(k, fill(v));
+        }
+        let mut child = match cmd
             .current_dir(&workdir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -115,13 +176,24 @@ fn clip_output(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Only a `claude` harness (with this command) and a missing `codex` one.
     fn cfg(claude: &[&str], timeout: u64) -> DelegateCfg {
+        let mut agents = std::collections::BTreeMap::new();
+        for name in ["codegem", "qwen", "deepseek"] {
+            agents.insert(name.into(), AgentCfg { cmd: vec!["fane-no-such-command-xyz".into()], ..Default::default() });
+        }
         DelegateCfg {
             claude_cmd: claude.iter().map(|s| s.to_string()).collect(),
             codex_cmd: vec!["fane-no-such-command-xyz".into()],
             timeout,
             cwd: std::env::temp_dir().display().to_string(),
+            agents,
+            ..Default::default()
         }
+    }
+
+    fn vars() -> Vars {
+        Vars { model: "gemma4:26b".into(), ollama_host: "http://127.0.0.1:11434".into() }
     }
 
     #[test]
@@ -143,22 +215,22 @@ mod tests {
     #[tokio::test]
     async fn rejects_unknown_agent_and_missing_command() {
         let d = Delegate::new(cfg(&["sh"], 5));
-        assert_eq!(d.run("gpt", "x", "").await, "error: agent must be 'claude' or 'codex'");
-        assert_eq!(d.run("codex", "x", "").await, "error: fane-no-such-command-xyz is not installed");
+        assert!(d.run("gpt", "x", "", &vars()).await.starts_with("error: unknown agent \"gpt\""));
+        assert_eq!(d.run("codex", "x", "", &vars()).await, "error: fane-no-such-command-xyz is not installed");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn runs_agent() {
         let d = Delegate::new(cfg(&["sh", "-c", "echo hi; echo \"$0\" >&2; pwd"], 5));
-        assert_eq!(d.available(), vec!["claude"]);
-        let out = d.run(" Claude ", "do the thing", "/").await;
+        assert_eq!(d.available().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["claude"]);
+        let out = d.run(" Claude ", "do the thing", "/", &vars()).await;
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3, "{out}");
         assert!(lines.contains(&"hi") && lines.contains(&"do the thing") && lines.contains(&"/"));
 
         let quiet = Delegate::new(cfg(&["sh", "-c", "exit 3"], 5));
-        assert_eq!(quiet.run("claude", "t", "").await, "claude finished with no output (exit 3)");
+        assert_eq!(quiet.run("claude", "t", "", &vars()).await, "claude finished with no output (exit 3)");
     }
 
     #[cfg(unix)]
@@ -166,7 +238,31 @@ mod tests {
     async fn times_out() {
         let d = Delegate::new(cfg(&["sh", "-c", "sleep 30"], 1));
         let start = std::time::Instant::now();
-        assert_eq!(d.run("claude", "t", "").await, "error: claude timed out after 1s");
+        assert_eq!(d.run("claude", "t", "", &vars()).await, "error: claude timed out after 1s");
         assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fills_placeholders_and_env() {
+        let mut cfg = cfg(&["fane-no-such-command-abc"], 5);
+        cfg.agents.insert(
+            "codegem".into(),
+            AgentCfg {
+                cmd: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo \"$1|$2|$OLLAMA_HOST\"".into(),
+                    "x".into(),
+                    "{model}".into(),
+                    "{task}".into(),
+                ],
+                env: [("OLLAMA_HOST".to_string(), "{ollama_host}".to_string())].into(),
+                ..Default::default()
+            },
+        );
+        let d = Delegate::new(cfg);
+        assert_eq!(d.available()[0].0, "codegem");
+        assert_eq!(d.run("codegem", "fix it", "", &vars()).await, "gemma4:26b|fix it|http://127.0.0.1:11434");
     }
 }

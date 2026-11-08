@@ -15,7 +15,8 @@ pub struct Handlers {
     pub delegate: Handler,
 }
 
-pub fn builtin_tools(h: Handlers, delegate_agents: &[String]) -> Vec<Tool> {
+/// `delegate_agents`: installed coding harnesses as (name, description), preferred first.
+pub fn builtin_tools(h: Handlers, delegate_agents: &[(String, String)]) -> Vec<Tool> {
     let mut tools = vec![
         Tool::new(
             "insert_text",
@@ -76,17 +77,21 @@ pub fn builtin_tools(h: Handlers, delegate_agents: &[String]) -> Vec<Tool> {
         ),
     ];
     if !delegate_agents.is_empty() {
+        let names: Vec<&str> = delegate_agents.iter().map(|(n, _)| n.as_str()).collect();
+        let listing: Vec<String> =
+            delegate_agents.iter().map(|(n, d)| if d.is_empty() { n.clone() } else { format!("{n} ({d})") }).collect();
         tools.push(Tool::new(
             "delegate",
             &format!(
-                "Hand a difficult task (coding, debugging, multi-step research) to a stronger coding agent. \
-                 Available: {}. Returns its final output.",
-                delegate_agents.join(", ")
+                "Hand a difficult task (coding, debugging, multi-step research) to a coding agent. \
+                 Available: {}. Use {} unless the user asks for another. Returns its final output.",
+                listing.join("; "),
+                names[0]
             ),
             params(
                 &["agent", "task"],
                 &[
-                    ("agent", json!({"type": "string", "enum": delegate_agents})),
+                    ("agent", json!({"type": "string", "enum": names})),
                     ("task", prop("string", "Complete, self-contained task description")),
                     ("cwd", prop("string", "Working directory (optional)")),
                 ],

@@ -11,7 +11,7 @@ use tokio::sync::{Notify, oneshot};
 use crate::agent::{Agent, AgentResult, ToolModes};
 use crate::config::{Config, set_value};
 use crate::connectors::builtin::{Handlers, builtin_tools};
-use crate::connectors::delegate::Delegate;
+use crate::connectors::delegate::{Delegate, Vars};
 use crate::connectors::mcp::McpManager;
 use crate::connectors::notes::Notes;
 use crate::connectors::thunderbird::ThunderbirdMail;
@@ -224,6 +224,7 @@ impl Core {
         let (c1, c2, c3, c4) = (core.clone(), core.clone(), core.clone(), core.clone());
         let n1 = notes.clone();
         let delegate = self.delegate.clone();
+        let llm = Arc::downgrade(&self.llm);
         let h = Handlers {
             insert_text: handler(move |a: Args| {
                 let core = c1();
@@ -258,7 +259,11 @@ impl Core {
             }),
             delegate: handler(move |a: Args| {
                 let delegate = delegate.clone();
-                async move { Ok(json!(delegate.run(&a.str("agent"), &a.require("task")?, &a.str("cwd")).await)) }
+                let vars = llm.upgrade().map(|l| Vars { model: l.model(), ollama_host: l.host() }).unwrap_or_default();
+                async move {
+                    let agent = a.str("agent");
+                    Ok(json!(delegate.run(&agent, &a.require("task")?, &a.str("cwd"), &vars).await))
+                }
             }),
         };
         let available = self.delegate.available();
