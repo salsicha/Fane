@@ -67,6 +67,13 @@ pub enum UiEvent {
     /// egui asked a window to repaint after this delay.
     Redraw(WindowKind, Duration),
     TrayMenu(String),
+    /// Offer first-run setup (installing Ollama / downloading the model); the text says what.
+    SetupOffer(String),
+    /// Show a progress card for a background task that isn't an agent job.
+    Working {
+        job: u64,
+        title: String,
+    },
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     Hotkey,
 }
@@ -100,6 +107,9 @@ pub struct Core {
     clipboard: Arc<Mutex<Option<arboard::Clipboard>>>,
     /// Lets UI-thread callers start work on the runtime.
     rt: tokio::runtime::Handle,
+    /// Run setup without asking (`fane run --setup`, used by the Windows installer).
+    pub auto_setup: AtomicBool,
+    setup_running: AtomicBool,
     me: Weak<Core>,
 }
 
@@ -145,6 +155,8 @@ impl Core {
             ui: OnceLock::new(),
             clipboard: Arc::new(Mutex::new(None)),
             rt: tokio::runtime::Handle::current(),
+            auto_setup: AtomicBool::new(false),
+            setup_running: AtomicBool::new(false),
             me: me.clone(),
         })
     }
@@ -181,20 +193,15 @@ impl Core {
                 tracing::error!("cannot listen for `fane` commands: {e}");
             }
         });
-        let llms = if Arc::ptr_eq(&self.llm, &self.suggest_llm) {
-            vec![self.llm.clone()]
-        } else {
-            vec![self.llm.clone(), self.suggest_llm.clone()]
-        };
-        for llm in llms {
-            match llm.resolve_model().await {
-                Ok(m) => tracing::info!("using model {m} on {}", llm.host()),
-                Err(e) => {
-                    tracing::error!("{e}");
-                    self.notify(e.to_string());
-                }
-            }
+        // Ollama or the model missing on this computer: offer to set them up instead of
+        // just reporting the error.
+        let setup = crate::setup::plan(&self.cfg().model).await.ok().filter(|p| !p.is_empty());
+        match &setup {
+            Some(_) if self.auto_setup.load(Ordering::SeqCst) => self.run_setup(),
+            Some(plan) if !setup_declined() => self.ui(UiEvent::SetupOffer(plan.describe())),
+            _ => {}
         }
+        self.resolve_models(setup.is_none()).await;
         self.register_builtin_tools();
         let mut reg = self.tools.read().unwrap().clone();
         self.mcp.start(&mut reg).await;
@@ -206,6 +213,66 @@ impl Core {
         self.ready.store(true, Ordering::SeqCst);
         let me = self.clone();
         self.rt.spawn(async move { me.suggest_loop().await });
+    }
+
+    async fn resolve_models(&self, report_errors: bool) {
+        let llms = if Arc::ptr_eq(&self.llm, &self.suggest_llm) {
+            vec![self.llm.clone()]
+        } else {
+            vec![self.llm.clone(), self.suggest_llm.clone()]
+        };
+        for llm in llms {
+            match llm.resolve_model().await {
+                Ok(m) => tracing::info!("using model {m} on {}", llm.host()),
+                Err(e) => {
+                    tracing::error!("{e}");
+                    if report_errors {
+                        self.notify(e.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // --- first-run setup -------------------------------------------------------------
+    /// Install/start Ollama and download the model in the background, with a progress card.
+    pub fn run_setup(self: &Arc<Self>) {
+        if self.setup_running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _ = std::fs::remove_file(setup_declined_path());
+        let job = self.job_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        self.ui(UiEvent::Working { job, title: "Setting up Fane".into() });
+        let me = self.clone();
+        self.rt.spawn(async move {
+            let cfg = me.cfg().model;
+            let status = |s: &str| me.ui(UiEvent::JobStatus(job, s.to_string()));
+            let outcome = match crate::setup::plan(&cfg).await {
+                Ok(plan) if plan.is_empty() => Ok(()),
+                Ok(plan) => crate::setup::run(&plan, true, &status).await,
+                Err(e) => Err(e),
+            };
+            me.resolve_models(false).await;
+            let ev = match outcome {
+                Ok(()) => UiEvent::JobDone {
+                    job,
+                    result: Some(AgentResult {
+                        text: format!("Fane is ready, using {} on Ollama.", me.llm.model()),
+                        ..Default::default()
+                    }),
+                    error: None,
+                },
+                Err(e) => UiEvent::JobDone { job, result: None, error: Some(format!("Setup didn't finish: {e}")) },
+            };
+            me.setup_running.store(false, Ordering::SeqCst);
+            me.ui(ev);
+        });
+    }
+
+    /// "Not now" on the setup card: don't offer again at startup (Settings can still run it).
+    pub fn decline_setup(&self) {
+        let _ = std::fs::create_dir_all(&*crate::config::STATE_DIR);
+        let _ = std::fs::write(setup_declined_path(), b"");
     }
 
     pub async fn shutdown(&self) {
@@ -651,6 +718,14 @@ impl Core {
         }
         json!({"ok": true})
     }
+}
+
+fn setup_declined_path() -> std::path::PathBuf {
+    crate::config::STATE_DIR.join("setup-declined")
+}
+
+fn setup_declined() -> bool {
+    setup_declined_path().exists()
 }
 
 pub fn valid_email(s: &str) -> bool {

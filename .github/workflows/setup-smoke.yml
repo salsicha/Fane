@@ -1,0 +1,42 @@
+name: Setup smoke test
+
+# Run by hand: installs Ollama with `fane setup` on clean macOS and Windows runners and
+# downloads a small model (not the 18 GB default) to check the whole path works.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ollama-setup]  # temporary, while this is reviewed
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  setup:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: fane setup (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          target/release/fane setup --yes --model all-minilm
+          target/release/fane setup --model all-minilm
+          target/release/fane doctor | grep -iE "ollama|model"
+      - name: fane setup (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # fane.exe is a GUI-subsystem program, so wait for it explicitly.
+          $p = Start-Process -FilePath target\release\fane.exe -ArgumentList 'setup','--yes','--model','all-minilm' -Wait -NoNewWindow -PassThru
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          $p = Start-Process -FilePath target\release\fane.exe -ArgumentList 'setup','--model','all-minilm' -Wait -NoNewWindow -PassThru
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          (Invoke-RestMethod http://127.0.0.1:11434/api/tags).models.name

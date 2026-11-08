@@ -13,6 +13,7 @@ mod ipc;
 mod llm;
 mod mail;
 mod platform;
+mod setup;
 mod snapshot;
 mod suggester;
 mod tools;

@@ -90,7 +90,8 @@ pasted at your cursor. It runs on a local vision model served by Ollama, can use
 another computer on your network, talks to your notes, Thunderbird mail and MCP servers, \
 and hands coding tasks to Claude Code or Codex."""
 depends = "$auto, ca-certificates, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libwayland-client0, libwayland-egl1"
-recommends = "gnome-shell-extension-appindicator"
+# curl and zstd: Ollama's installer needs them when `fane setup` installs Ollama.
+recommends = "gnome-shell-extension-appindicator, curl, zstd"
 suggests = "ydotool, xdotool, wmctrl"
 assets = [
     ["target/release/fane", "usr/bin/", "755"],

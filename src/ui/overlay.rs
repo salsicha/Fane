@@ -32,6 +32,8 @@ pub enum Card {
         details: Value,
         tx: Option<oneshot::Sender<bool>>,
     },
+    /// First-run setup offer.
+    Offer(String),
 }
 
 pub enum OverlayAction {
@@ -42,6 +44,8 @@ pub enum OverlayAction {
     Insert(String),
     Open(String),
     Copy(String),
+    SetupAccepted,
+    SetupDeclined,
 }
 
 #[derive(Default)]
@@ -137,6 +141,12 @@ impl Overlay {
             if self.has_suggestion() {
                 return; // don't clobber a pending suggestion with a notice
             }
+            self.present(c, s);
+        }
+    }
+
+    pub fn show_offer(&mut self, text: &str) {
+        if let Some((c, s)) = self.defer(Card::Offer(text.into()), 120) {
             self.present(c, s);
         }
     }
@@ -245,6 +255,10 @@ impl Overlay {
                 (String::new(), t, text.clone(), !*error, 240.0)
             }
             Some(Card::Toast(text)) => (String::new(), text.clone(), String::new(), false, 0.0),
+            Some(Card::Offer(text)) => {
+                buttons = vec![("Not now", false, 8), ("Set up", true, 9)];
+                ("· setup".into(), "Set up Fane?".into(), format!("{text}. Fane needs these to work."), false, 80.0)
+            }
             Some(Card::Confirm { details, .. }) => {
                 buttons = vec![("Cancel", false, 6), ("Send", true, 7)];
                 let list = |k: &str| {
@@ -303,6 +317,11 @@ impl Overlay {
         self.hovered =
             resp.response.rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or(egui::pos2(-1.0, -1.0)));
 
+        if close && matches!(self.card, Some(Card::Offer(_))) {
+            self.fade_out();
+            actions.push(OverlayAction::SetupDeclined);
+            close = false;
+        }
         if close {
             if self.confirming() {
                 self.resolve(false);
@@ -338,6 +357,14 @@ impl Overlay {
             Some(5) => {
                 self.fade_out();
                 actions.push(OverlayAction::Insert(text));
+            }
+            Some(8) => {
+                self.fade_out();
+                actions.push(OverlayAction::SetupDeclined);
+            }
+            Some(9) => {
+                self.fade_out();
+                actions.push(OverlayAction::SetupAccepted);
             }
             Some(6) => self.resolve(false),
             Some(7) => self.resolve(true),

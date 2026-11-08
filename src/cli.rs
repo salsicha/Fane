@@ -22,6 +22,21 @@ enum Cmd {
     Run {
         #[arg(short, long)]
         verbose: bool,
+        /// Install Ollama and download the model if they're missing, without asking
+        #[arg(long)]
+        setup: bool,
+    },
+    /// Install Ollama and download the default model (Gemma 4 26B) if they're missing
+    Setup {
+        /// Don't ask for confirmation
+        #[arg(short, long)]
+        yes: bool,
+        /// Only install and start Ollama
+        #[arg(long)]
+        skip_model: bool,
+        /// Download this model instead of the configured one
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Show/hide the prompt box
     Toggle,
@@ -151,8 +166,9 @@ pub fn wants_console(args: &[String]) -> bool {
 
 pub fn main() -> i32 {
     let cli = Cli::parse();
-    let result = match cli.cmd.unwrap_or(Cmd::Run { verbose: false }) {
-        Cmd::Run { verbose } => cmd_run(verbose),
+    let result = match cli.cmd.unwrap_or(Cmd::Run { verbose: false, setup: false }) {
+        Cmd::Run { verbose, setup } => cmd_run(verbose, setup),
+        Cmd::Setup { yes, skip_model, model } => cmd_setup(yes, skip_model, model),
         Cmd::Toggle => cmd_simple("toggle", json!({})),
         Cmd::Ask { text } => cmd_simple("ask", json!({"text": text.join(" ")})),
         Cmd::Suggest => cmd_simple("suggest", json!({})),
@@ -203,7 +219,7 @@ fn setup_logging(verbose: bool) {
         .try_init();
 }
 
-fn cmd_run(verbose: bool) -> anyhow::Result<i32> {
+fn cmd_run(verbose: bool, setup: bool) -> anyhow::Result<i32> {
     if ipc::running() {
         println!("Fane is already running. Use `fane toggle` to open it.");
         return Ok(0);
@@ -212,9 +228,61 @@ fn cmd_run(verbose: bool) -> anyhow::Result<i32> {
     let cfg = Config::load()?;
     let rt = runtime();
     let core = rt.block_on(crate::core::Core::new(cfg));
+    core.auto_setup.store(setup, std::sync::atomic::Ordering::SeqCst);
     crate::ui::run(core, rt.handle().clone())?;
     rt.shutdown_timeout(Duration::from_secs(2));
     Ok(0)
+}
+
+fn cmd_setup(yes: bool, skip_model: bool, model: Option<String>) -> anyhow::Result<i32> {
+    use std::io::Write;
+    let mut mcfg = Config::load()?.model;
+    if let Some(m) = model {
+        mcfg.name = m;
+    }
+    let rt = runtime();
+    let mut plan = match rt.block_on(crate::setup::plan(&mcfg)) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return Ok(1);
+        }
+    };
+    if skip_model {
+        plan.model = None;
+    }
+    if plan.is_empty() {
+        println!("Ollama is running at {} and {} is installed. Nothing to do.", plan.host, mcfg.name);
+        return Ok(0);
+    }
+    println!("Fane will: {}.", plan.describe());
+    if plan.install {
+        println!("Ollama comes from its official installer (https://ollama.com/download).");
+    }
+    if !yes {
+        print!("Continue? [Y/n] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if answer.trim().to_lowercase().starts_with('n') {
+            println!("Nothing changed.");
+            return Ok(1);
+        }
+    }
+    let progress = |s: &str| {
+        print!("\r\x1b[2K{s}");
+        let _ = std::io::stdout().flush();
+    };
+    match rt.block_on(crate::setup::run(&plan, false, &progress)) {
+        Ok(()) => {
+            println!("\nDone. Start Fane with `fane` (or from your app menu).");
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("\nSetup didn't finish: {e}");
+            Ok(1)
+        }
+    }
 }
 
 /// Start the app in the background (when the hotkey is pressed while it isn't running).
@@ -408,6 +476,9 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
         println!("config: {}", CONFIG_PATH.display());
         println!("os: {} {}", std::env::consts::OS, std::env::consts::ARCH);
         let llm = Ollama::new(&cfg.model);
+        if crate::setup::is_local(&llm.host()) && crate::setup::ollama_binary().is_none() {
+            println!("{} Ollama: not installed — run `fane setup`", ok(false));
+        }
         match llm.resolve_model().await {
             Ok(m) => {
                 println!("{} model: {m} on {}", ok(true), llm.host());

@@ -15,6 +15,7 @@ Icon "fane.ico"
 UninstallIcon "fane.ico"
 SetCompressor /SOLID lzma
 
+Page components
 Page directory
 Page instfiles
 UninstPage uninstConfirm
@@ -22,7 +23,8 @@ UninstPage instfiles
 
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Fane"
 
-Section "Fane"
+Section "Fane" SecFane
+  SectionIn RO
   SetOutPath "$INSTDIR"
   File "..\..\target\release\fane.exe"
   File "fane.ico"
@@ -35,6 +37,12 @@ Section "Fane"
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+SectionEnd
+
+; Runs after the files are in place: Fane starts and, if Ollama or the model is missing,
+; installs Ollama (official per-user installer) and downloads Gemma 4 26B with a progress card.
+Section "Install Ollama and download Gemma 4 (about 18 GB)" SecSetup
+  Exec '"$INSTDIR\fane.exe" run --setup'
 SectionEnd
 
 Section "Uninstall"

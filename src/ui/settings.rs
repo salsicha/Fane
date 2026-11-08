@@ -14,6 +14,8 @@ pub enum SettingsAction {
     SelectAccount(String),
     SaveOwner(String),
     ManageAccounts,
+    /// Install Ollama / download the model if missing.
+    Setup,
     EditConfig,
     Close,
 }
@@ -191,6 +193,12 @@ impl Settings {
                     self.using = true;
                     self.server_status = format!("Connecting to {}…", self.address.trim());
                     actions.push(SettingsAction::UseServer(self.address.trim().to_string()));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("No Ollama on this computer, or no model yet?").color(dim));
+                if ui.button("Install Ollama and Gemma 4…").clicked() {
+                    actions.push(SettingsAction::Setup);
                 }
             });
             ui.label(

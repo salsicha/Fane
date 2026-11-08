@@ -78,6 +78,7 @@ struct App {
     overlay: Overlay,
     settings: Settings,
     jobs: HashMap<u64, (Origin, String)>,
+    setup_jobs: HashSet<u64>,
     repaint_at: HashMap<WindowKind, Instant>,
     tray: Option<tray::Tray>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -101,6 +102,7 @@ impl App {
             overlay: Overlay::default(),
             settings,
             jobs: HashMap::new(),
+            setup_jobs: HashSet::new(),
             repaint_at: HashMap::new(),
             tray: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -387,6 +389,8 @@ impl App {
             OverlayAction::Insert(t) => self.insert(t),
             OverlayAction::Open(t) => self.core.open_palette(String::new(), false, Some(t)),
             OverlayAction::Copy(t) => self.copy(t),
+            OverlayAction::SetupAccepted => self.core.run_setup(),
+            OverlayAction::SetupDeclined => self.core.decline_setup(),
         }
         self.update_busy();
     }
@@ -452,6 +456,7 @@ impl App {
                     tracing::warn!("cannot open {}: {e}", CONFIG_PATH.display());
                 }
             }
+            SettingsAction::Setup => self.core.run_setup(),
             SettingsAction::Close => self.set_visible(WindowKind::Settings, false),
         }
     }
@@ -592,7 +597,11 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::JobDone { job, result, error } => {
                 let (origin, title) = self.jobs.remove(&job).unwrap_or((Origin::Overlay, String::new()));
                 let text = error.clone().unwrap_or_else(|| result.as_ref().map(|r| r.text.clone()).unwrap_or_default());
-                if result.as_ref().is_some_and(|r| r.inserted) {
+                if self.setup_jobs.remove(&job) && error.is_none() {
+                    // Not an answer to insert or copy: just say it worked.
+                    self.overlay.toast(&text, 8);
+                    self.show_overlay(event_loop);
+                } else if result.as_ref().is_some_and(|r| r.inserted) {
                     let note = if !text.is_empty() && text.chars().count() < 80 {
                         format!("Inserted ✓ — {text}")
                     } else {
@@ -611,6 +620,16 @@ impl ApplicationHandler<UiEvent> for App {
                     self.overlay.show_result(job, &title, &text, error.is_some());
                     self.show_overlay(event_loop);
                 }
+            }
+            UiEvent::SetupOffer(text) => {
+                self.overlay.show_offer(&text);
+                self.show_overlay(event_loop);
+            }
+            UiEvent::Working { job, title } => {
+                self.jobs.insert(job, (Origin::Overlay, title.clone()));
+                self.setup_jobs.insert(job);
+                self.overlay.show_working(job, &title);
+                self.show_overlay(event_loop);
             }
             UiEvent::Notify(text) => {
                 self.overlay.toast(&text, 6);

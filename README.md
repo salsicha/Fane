@@ -27,9 +27,17 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
 
 ## Install
 
-You also need [Ollama](https://ollama.com/download) with one of the
-[recommended models](#recommended-models), e.g. `ollama pull gemma4:26b`, and optionally its
-[coding agent](#coding-agents) (for the default, CodeGem: `uv tool install superqode`).
+Fane runs on [Ollama](https://ollama.com) and the [Gemma 4 26B](#recommended-models) model.
+If they're missing, Fane sets them up for you: the Windows installer does it right away (an
+option that's on by default), and on Linux and macOS the first launch shows a **Set up Fane?**
+card. You can also run `fane setup` in a terminal, or use **Settings… → Install Ollama and
+Gemma 4…**. Setup installs Ollama with its official installer for your OS (on Linux that
+asks for your password), starts it, and downloads `gemma4:26b` (about 18 GB) with a progress
+bar. It does nothing if they're already there, and it never installs anything on a remote
+Ollama server you picked in Settings.
+
+Optionally install the default [coding agent](#coding-agents), CodeGem:
+`uv tool install superqode`.
 
 ### Ubuntu 24.04+ (apt)
 
@@ -41,9 +49,12 @@ sudo apt update && sudo apt install fane
 
 Packages are built for amd64 and arm64. The `.deb` files are also attached to each
 [GitHub release](https://github.com/salsicha/Fane/releases) (`sudo apt install ./fane_*.deb`).
-Then set it up for your desktop:
+apt doesn't run Fane's setup itself (a multi-gigabyte download inside apt would hold its lock
+and break offline installs), so the first launch offers it instead. Then set it up for your
+desktop:
 
 ```bash
+fane setup                    # install Ollama and download Gemma 4 26B if missing
 fane install-extension        # GNOME helper (log out and back in once on Wayland)
 fane setup-shortcut           # Ctrl+Super+Space opens the prompt box
 fane autostart on             # optional: start at login
@@ -63,7 +74,9 @@ Settings → Privacy & Security. The hotkey is <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<
 ### Windows 10/11
 
 Download `Fane-<version>-windows-x64-setup.exe` (per-user install, no admin rights) or the
-portable `.zip` from the [releases](https://github.com/salsicha/Fane/releases). Fane lives
+portable `.zip` from the [releases](https://github.com/salsicha/Fane/releases). The installer's
+**Install Ollama and download Gemma 4** option (on by default) starts Fane when it's done and
+sets both up. Fane lives
 in the notification area. The hotkey is <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd>.
 
 On macOS and Windows, `fane autostart on` (from a terminal, using the full path to the
