@@ -176,10 +176,11 @@ Fane is tuned for three pairings of a local vision model with a command-line cod
 switches to asking for a JSON action instead. You can force either convention with
 `[model] tool_mode`.
 
-On a Tesla V100 (32 GB), `fane eval --harness` gave all three pairings full marks on Fane's
-own tasks. Gemma 4 26B was the fastest (median agent task 2.9 s, 126 tokens/s, versus 3.1 s
-for MiniCPM and 5.6 s for Qwen 3.8), and each harness fixed the eval's failing test on its
-paired model: CodeGem in 18 s, the DeepSeek harness in 23 s and Qwen Code in 48 s.
+On a Tesla V100 (32 GB), `fane eval --harness` scored Gemma 4 26B and Qwen 3.8 100/100 on
+Fane's own tasks and MiniCPM 97.5 (it once delegated a fix without describing the error).
+Gemma 4 26B was the fastest: a median agent task took 2.9 s at 126 tokens/s, versus 3.7 s for
+MiniCPM and 5.8 s for Qwen 3.8. Each harness fixed the eval's failing test on its paired
+model: the DeepSeek harness in 18 s, CodeGem in 26 s and Qwen Code in 60 s.
 
 To use pairing 2 or 3, set the model and the harness:
 
