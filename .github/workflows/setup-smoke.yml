@@ -5,8 +5,6 @@ name: Setup smoke test
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ollama-setup]  # temporary, while this is reviewed
 
 env:
   CARGO_TERM_COLOR: always
