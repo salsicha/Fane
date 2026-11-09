@@ -9,17 +9,20 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, oneshot};
 
 use crate::agent::{Agent, AgentResult, ToolModes};
-use crate::config::{Config, set_value};
+use crate::config::{Config, RemoteCfg, Role, set_value};
 use crate::connectors::builtin::{Handlers, builtin_tools};
 use crate::connectors::delegate::{Delegate, Vars};
 use crate::connectors::mcp::McpManager;
+use crate::connectors::media::Media;
 use crate::connectors::notes::Notes;
 use crate::connectors::thunderbird::ThunderbirdMail;
-use crate::discovery::{self, OllamaServer};
-use crate::llm::{Ollama, choose_model};
+use crate::discovery::{self, Server};
+use crate::llm::{Llm, choose_model};
 use crate::mail::accounts::{GoaAccount, OnlineAccounts};
 use crate::mail::mailbox::{AgentMailbox, MailHost, mail_tool_names};
 use crate::platform::{self, Desktop};
+use crate::runtime::Runtime;
+use crate::setup::Want;
 use crate::snapshot::{Snapshot, WindowInfo, is_private};
 use crate::suggester::{Suggester, Suggestion};
 use crate::tools::{Args, ToolRegistry, handler};
@@ -60,15 +63,24 @@ pub enum UiEvent {
         submit: bool,
         answer: Option<String>,
     },
-    Servers(Result<Vec<OllamaServer>, String>),
-    OllamaUsed(Result<(String, String), String>),
+    Servers(Result<Vec<Server>, String>),
+    ServerUsed(Result<(String, String), String>),
     MailAccounts(Result<Vec<GoaAccount>, String>),
     MailSaved(Result<String, String>),
     /// egui asked a window to repaint after this delay.
     Redraw(WindowKind, Duration),
     TrayMenu(String),
-    /// Offer first-run setup (installing Ollama / downloading the model); the text says what.
-    SetupOffer(String),
+    /// Offer setup (getting llama.cpp / downloading models); the text says what.
+    SetupOffer {
+        title: String,
+        text: String,
+    },
+    /// Settings' Models page has news (an install finished, a GPU or route changed).
+    ModelsChanged,
+    /// The model server's status, for Settings.
+    ModelsInfo(Value),
+    /// The outcome of a Settings → Models action.
+    ModelsStatus(Result<String, String>),
     /// Show a progress card for a background task that isn't an agent job.
     Working {
         job: u64,
@@ -84,8 +96,8 @@ pub trait UiSink: Send + Sync {
 
 pub struct Core {
     pub cfg: RwLock<Config>,
-    pub llm: Arc<Ollama>,
-    pub suggest_llm: Arc<Ollama>,
+    pub llm: Arc<Llm>,
+    pub suggest_llm: Arc<Llm>,
     pub tools: RwLock<ToolRegistry>,
     modes: ToolModes,
     pub desktop: Desktop,
@@ -109,6 +121,8 @@ pub struct Core {
     rt: tokio::runtime::Handle,
     /// Run setup without asking (`fane run --setup`, used by the Windows installer).
     pub auto_setup: AtomicBool,
+    /// What the installer asked for beyond the everyday model.
+    pub auto_want: Mutex<Want>,
     setup_running: AtomicBool,
     /// The job whose agent is running, for tools that report progress (delegation).
     current_job: Mutex<Option<u64>>,
@@ -117,6 +131,9 @@ pub struct Core {
     /// The user's standing preferences.
     pub prefs: Arc<crate::prefs::Prefs>,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// Fane's model server, when this process runs it (not when the background service does).
+    pub runtime: RwLock<Option<Arc<Runtime>>>,
+    server_stop: Mutex<Option<oneshot::Sender<()>>>,
     me: Weak<Core>,
 }
 
@@ -126,13 +143,14 @@ fn paste_keys() -> &'static str {
 
 impl Core {
     pub async fn new(cfg: Config) -> Arc<Core> {
-        let llm = Arc::new(Ollama::new(&cfg.model));
+        let host = cfg.llm_host();
+        let llm = Arc::new(Llm::new(&cfg.model, &host));
         let suggest_llm = if cfg.model.suggest_name.is_empty() {
             llm.clone()
         } else {
             let mut m = cfg.model.clone();
             m.name = cfg.model.suggest_name.clone();
-            Arc::new(Ollama::new(&m))
+            Arc::new(Llm::new(&m, &host))
         };
         let desktop = Desktop::connect().await;
         let db = crate::config::STATE_DIR.join("fane.db");
@@ -170,11 +188,14 @@ impl Core {
             clipboard: Arc::new(Mutex::new(None)),
             rt: tokio::runtime::Handle::current(),
             auto_setup: AtomicBool::new(false),
+            auto_want: Mutex::new(Want::default()),
             setup_running: AtomicBool::new(false),
             current_job: Mutex::new(None),
             index,
             prefs,
             watcher: Mutex::new(None),
+            runtime: RwLock::new(None),
+            server_stop: Mutex::new(None),
             me: me.clone(),
         })
     }
@@ -211,15 +232,45 @@ impl Core {
                 tracing::error!("cannot listen for `fane` commands: {e}");
             }
         });
-        // Ollama or the model missing on this computer: offer to set them up instead of
-        // just reporting the error.
-        let setup = crate::setup::plan(&self.cfg().model).await.ok().filter(|p| !p.is_empty());
-        match &setup {
-            Some(_) if self.auto_setup.load(Ordering::SeqCst) => self.run_setup(),
-            Some(plan) if !setup_declined() => self.ui(UiEvent::SetupOffer(plan.describe())),
-            _ => {}
-        }
-        self.resolve_models(setup.is_none()).await;
+        self.start_model_server().await;
+        // Something missing on this computer: offer to set it up instead of just reporting the
+        // error. An older setup that used Ollama keeps working until the user chooses.
+        let cfg = self.cfg();
+        let needs_setup = if crate::setup::is_local_ollama(&cfg.model.host) {
+            if self.auto_setup.load(Ordering::SeqCst) {
+                self.run_setup(*self.auto_want.lock().unwrap());
+            } else if !setup_declined() {
+                self.ui(UiEvent::SetupOffer {
+                    title: "Run models with llama.cpp?".into(),
+                    text: format!(
+                        "Fane can now run {} itself, using the copy Ollama already downloaded, and share the GPU with \
+                         image and video generation. Ollama stays as it is.",
+                        cfg.model.name
+                    ),
+                });
+            }
+            false
+        } else {
+            let c = cfg.clone();
+            let want =
+                if self.auto_setup.load(Ordering::SeqCst) { *self.auto_want.lock().unwrap() } else { Want::default() };
+            let plan = tokio::task::spawn_blocking(move || crate::setup::plan(&c, want)).await.unwrap_or_default();
+            if plan.is_empty() {
+                false
+            } else {
+                if self.auto_setup.load(Ordering::SeqCst) {
+                    self.run_setup(want);
+                } else if !setup_declined() {
+                    self.ui(UiEvent::SetupOffer {
+                        title: "Set up Fane?".into(),
+                        text: format!("{}. Fane needs this to work.", plan.describe(&cfg)),
+                    });
+                }
+                true
+            }
+        };
+        self.resolve_models(!needs_setup).await;
+        self.update_delegate_order().await;
         self.register_builtin_tools();
         let mut reg = self.tools.read().unwrap().clone();
         self.mcp.start(&mut reg).await;
@@ -269,9 +320,10 @@ impl Core {
         }
     }
 
-    // --- first-run setup -------------------------------------------------------------
-    /// Install/start Ollama and download the model in the background, with a progress card.
-    pub fn run_setup(self: &Arc<Self>) {
+    // --- setup -------------------------------------------------------------------------
+    /// Get what's missing (llama.cpp, models, and the extras in `want`) in the background, with a
+    /// progress card. An older Ollama setup switches to Fane's own models here.
+    pub fn run_setup(self: &Arc<Self>, want: Want) {
         if self.setup_running.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -280,19 +332,28 @@ impl Core {
         self.ui(UiEvent::Working { job, title: "Setting up Fane".into() });
         let me = self.clone();
         self.rt.spawn(async move {
-            let cfg = me.cfg().model;
+            if crate::setup::is_local_ollama(&me.cfg().model.host) {
+                // Chosen by the user on the offer card (or in Settings): stop using Ollama.
+                if let Err(e) = set_value("model", "host", "") {
+                    tracing::warn!("can't save the config: {e}");
+                }
+                me.cfg.write().unwrap().model.host.clear();
+                let host = me.cfg().llm_host();
+                me.llm.set_host(&host);
+                me.suggest_llm.set_host(&host);
+            }
+            let cfg = me.cfg();
             let status = |s: &str| me.ui(UiEvent::JobStatus(job, s.to_string()));
-            let outcome = match crate::setup::plan(&cfg).await {
-                Ok(plan) if plan.is_empty() => Ok(()),
-                Ok(plan) => crate::setup::run(&plan, true, &status).await,
-                Err(e) => Err(e),
-            };
+            let c = cfg.clone();
+            let plan = tokio::task::spawn_blocking(move || crate::setup::plan(&c, want)).await.unwrap_or_default();
+            let outcome = if plan.is_empty() { Ok(()) } else { crate::setup::run(&plan, &cfg, &status).await };
+            me.models_changed().await;
             me.resolve_models(false).await;
             let ev = match outcome {
                 Ok(()) => UiEvent::JobDone {
                     job,
                     result: Some(AgentResult {
-                        text: format!("Fane is ready, using {} on Ollama.", me.llm.model()),
+                        text: format!("Fane is ready, using {}.", me.llm.model()),
                         ..Default::default()
                     }),
                     error: None,
@@ -315,6 +376,263 @@ impl Core {
             mb.stop().await;
         }
         self.mcp.stop().await;
+        self.stop_model_server().await;
+    }
+
+    // --- Fane's model server -------------------------------------------------------------
+    /// Run the model server in this process, unless one (the background service) already
+    /// answers on the port.
+    async fn start_model_server(self: &Arc<Self>) {
+        let cfg = self.cfg();
+        let url = cfg.runtime.url();
+        if crate::runtime::router::answering(&url).await {
+            tracing::info!("using the model server already running at {url}");
+            return;
+        }
+        let rt = self.runtime.read().unwrap().clone().unwrap_or_else(|| Runtime::new(cfg.clone()));
+        match crate::runtime::router::bind(&cfg.runtime).await {
+            Ok(listener) => {
+                let (tx, rx) = oneshot::channel::<()>();
+                let rt2 = rt.clone();
+                self.rt.spawn(async move {
+                    if let Err(e) = crate::runtime::router::run(listener, rt2, async {
+                        let _ = rx.await;
+                    })
+                    .await
+                    {
+                        tracing::error!("model server stopped: {e}");
+                    }
+                });
+                *self.server_stop.lock().unwrap() = Some(tx);
+                *self.runtime.write().unwrap() = Some(rt);
+            }
+            Err(e) => {
+                tracing::error!("{e}");
+                self.notify(format!("Fane's model server couldn't start: {e}"));
+            }
+        }
+    }
+
+    /// Stop serving (models keep running unless `everything`).
+    async fn stop_serving(&self, everything: bool) {
+        if let Some(tx) = self.server_stop.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        if everything {
+            let rt = self.runtime.write().unwrap().take();
+            if let Some(rt) = rt {
+                rt.shutdown().await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    async fn stop_model_server(&self) {
+        self.stop_serving(true).await;
+    }
+
+    /// Tell the model server the config changed (in this process, or the background service).
+    async fn apply_runtime_cfg(&self) {
+        let cfg = self.cfg();
+        let rt = self.runtime.read().unwrap().clone();
+        match rt {
+            Some(rt) => {
+                rt.set_cfg(cfg.clone());
+                rt.redetect();
+            }
+            None => {
+                let c = crate::llm::http_client(Duration::from_secs(5));
+                let _ = c.post(format!("{}/fane/v1/reload", cfg.runtime.url())).send().await;
+            }
+        }
+    }
+
+    /// After installs or config changes: refresh the server, tools, harness order and Settings.
+    pub async fn models_changed(self: &Arc<Self>) {
+        self.apply_runtime_cfg().await;
+        self.update_delegate_order().await;
+        self.register_media_tools();
+        if self.ready.load(Ordering::SeqCst) {
+            self.refresh_capabilities();
+        }
+        self.ui(UiEvent::ModelsChanged);
+    }
+
+    /// The model server's status (`/fane/v1/info`).
+    pub async fn models_info(&self) -> Value {
+        let rt = self.runtime.read().unwrap().clone();
+        if let Some(rt) = rt {
+            let mut v = rt.info();
+            v["service"] = json!(crate::runtime::service::installed());
+            return v;
+        }
+        let url = self.cfg().runtime.url();
+        let c = crate::llm::http_client(Duration::from_secs(5));
+        match c.get(format!("{url}/fane/v1/info")).send().await {
+            Ok(r) => {
+                let mut v: Value = r.json().await.unwrap_or_default();
+                v["service"] = json!(crate::runtime::service::installed());
+                v
+            }
+            Err(e) => json!({"error": format!("Fane's model server isn't answering: {e}")}),
+        }
+    }
+
+    /// Which GPU a kind of work uses ("auto" or a GPU id).
+    pub async fn set_role_gpu(self: &Arc<Self>, role: Role, gpu: &str) -> Result<String, String> {
+        let key = format!("{}_gpu", role.as_str());
+        set_value("runtime", &key, gpu).map_err(|e| e.to_string())?;
+        {
+            let mut cfg = self.cfg.write().unwrap();
+            match role {
+                Role::Chat => cfg.runtime.chat_gpu = gpu.into(),
+                Role::Code => cfg.runtime.code_gpu = gpu.into(),
+                Role::Image => cfg.runtime.image_gpu = gpu.into(),
+                Role::Video => cfg.runtime.video_gpu = gpu.into(),
+            }
+        }
+        self.models_changed().await;
+        Ok(format!("{} work will run on {gpu} (from its next start)", role.as_str()))
+    }
+
+    /// Where a kind of work goes, first choice first.
+    pub async fn set_route(self: &Arc<Self>, role: Role, targets: Vec<String>) -> Result<String, String> {
+        set_value("routes", role.as_str(), crate::config::str_array(&targets)).map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().routes.set(role, targets.clone());
+        self.models_changed().await;
+        Ok(format!("{} requests go to: {}", role.as_str(), targets.join(", then ")))
+    }
+
+    /// Add another computer running Fane (or a server) to send work to. Returns its name.
+    pub async fn add_remote(self: &Arc<Self>, url: &str, token: &str) -> Result<String, String> {
+        let url = discovery::normalize_with_port(url, 11500).map_err(|e| e.0)?;
+        let found = discovery::identify(&url, token.trim(), "").await?;
+        let server = discovery::probe(&url).await.ok();
+        let base = server.as_ref().map(|s| s.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| {
+            url::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or(url.clone())
+        });
+        let name: String = base
+            .split('.')
+            .next()
+            .unwrap_or(&base)
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+            .collect();
+        let name = if name.is_empty() || ["local", "claude", "codex"].contains(&name.as_str()) {
+            format!("remote-{name}")
+        } else {
+            name
+        };
+        let remote = RemoteCfg { url: url.clone(), token: token.trim().to_string(), kind: found.kind.clone() };
+        crate::config::set_remote(&name, Some(&remote)).map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().remotes.insert(name.clone(), remote);
+        if let Some(rt) = self.runtime.read().unwrap().clone() {
+            rt.forget_remote_cache(&name);
+        }
+        self.models_changed().await;
+        Ok(name)
+    }
+
+    pub async fn remove_remote(self: &Arc<Self>, name: &str) -> Result<String, String> {
+        crate::config::set_remote(name, None).map_err(|e| e.to_string())?;
+        let routes = {
+            let mut cfg = self.cfg.write().unwrap();
+            cfg.remotes.remove(name);
+            cfg.routes.clone()
+        };
+        for role in Role::ALL {
+            let list = routes.for_role(role);
+            if list.iter().any(|t| t == name) {
+                let kept: Vec<String> = list.iter().filter(|t| *t != name).cloned().collect();
+                let _ = self.set_route(role, kept).await;
+            }
+        }
+        self.models_changed().await;
+        Ok(format!("Removed {name}"))
+    }
+
+    /// Let other computers use this one's models (with a token), or stop. Returns the token.
+    pub async fn set_share(self: &Arc<Self>, on: bool) -> Result<String, String> {
+        let mut token = self.cfg().runtime.token;
+        if on && token.is_empty() {
+            use rand::RngExt;
+            const CHARS: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
+            let mut rng = rand::rng();
+            token = (0..20).map(|_| CHARS[rng.random_range(0..CHARS.len())] as char).collect();
+            set_value("runtime", "token", token.as_str()).map_err(|e| e.to_string())?;
+        }
+        set_value("runtime", "share", on).map_err(|e| e.to_string())?;
+        {
+            let mut cfg = self.cfg.write().unwrap();
+            cfg.runtime.share = on;
+            cfg.runtime.token = token.clone();
+        }
+        // Listen on the network (or stop); models keep running.
+        if self.runtime.read().unwrap().is_some() {
+            self.stop_serving(false).await;
+            self.start_model_server().await;
+        }
+        self.models_changed().await;
+        Ok(token)
+    }
+
+    /// Run the model server as a background service (or stop doing so).
+    pub async fn set_service(self: &Arc<Self>, on: bool) -> Result<String, String> {
+        if on {
+            self.stop_model_server().await;
+            let note =
+                tokio::task::spawn_blocking(crate::runtime::service::install).await.map_err(|e| e.to_string())??;
+            let url = self.cfg().runtime.url();
+            for _ in 0..40 {
+                if crate::runtime::router::answering(&url).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            self.models_changed().await;
+            Ok(note)
+        } else {
+            tokio::task::spawn_blocking(crate::runtime::service::uninstall).await.map_err(|e| e.to_string())??;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            self.start_model_server().await;
+            self.models_changed().await;
+            Ok("Fane's model server now runs only while Fane is open.".into())
+        }
+    }
+
+    /// Harness preference from `[routes] code`: local harnesses where local (or remote) models
+    /// can run the coding model, then Claude Code / Codex in the route's order.
+    async fn update_delegate_order(&self) {
+        let cfg = self.cfg();
+        let mut order = vec![];
+        for target in &cfg.routes.code {
+            match target.as_str() {
+                "claude" | "codex" => order.push(target.clone()),
+                _ => {
+                    for h in ["qwen", "codegem"] {
+                        if !order.contains(&h.to_string()) {
+                            order.push(h.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        self.delegate.set_order(order);
+    }
+
+    /// generate_image / generate_video, when some route can make them.
+    fn register_media_tools(&self) {
+        let cfg = self.cfg();
+        let media = Arc::new(Media::new(&cfg));
+        let mut reg = self.tools.write().unwrap();
+        for tool in media.tools() {
+            let role = if tool.name == "generate_video" { Role::Video } else { Role::Image };
+            if crate::connectors::media::route_exists(&cfg, role) {
+                reg.add(tool);
+            } else {
+                reg.remove(&tool.name);
+            }
+        }
     }
 
     fn register_builtin_tools(&self) {
@@ -361,8 +679,12 @@ impl Core {
             }),
             delegate: handler(move |a: Args| {
                 let delegate = delegate.clone();
-                let vars = llm.upgrade().map(|l| Vars { model: l.model(), ollama_host: l.host() }).unwrap_or_default();
                 let core = c5();
+                let code_model = core.as_ref().map(|c| c.cfg().model.code).unwrap_or_default();
+                let vars = llm
+                    .upgrade()
+                    .map(|l| Vars { model: l.model(), code_model: code_model.clone(), host: l.host() })
+                    .unwrap_or_default();
                 async move {
                     let agent = a.str("agent");
                     let core = core?;
@@ -380,6 +702,7 @@ impl Core {
         drop(reg);
         self.register_file_tools();
         self.register_memory_tools();
+        self.register_media_tools();
     }
 
     /// (Re)build the filesystem tools from `[files]`; changes are confirmed on a card.
@@ -905,23 +1228,34 @@ impl Core {
         self.setup_mail().await;
     }
 
-    // --- which Ollama server ---------------------------------------------------------------
-    pub async fn discover_ollama(&self) -> Vec<OllamaServer> {
-        discovery::discover(&[self.llm.host()]).await
+    // --- other computers and servers ---------------------------------------------------------
+    /// Model servers on this computer and the network (other Fanes, Ollama, ...).
+    pub async fn discover_servers(&self) -> Vec<Server> {
+        let cfg = self.cfg();
+        let mut extra = vec![self.llm.host()];
+        extra.extend(cfg.remotes.values().map(|r| r.url.clone()));
+        discovery::discover(&extra).await
     }
 
-    /// Switch to the Ollama server at `url` and save it. Returns (host, model).
-    /// Nothing changes unless the server answers and has one of Fane's models installed.
-    pub async fn use_ollama(&self, url: &str) -> Result<(String, String), String> {
-        let url = discovery::normalize_host(url).map_err(|e| e.0)?;
-        let server = discovery::probe(&url).await.map_err(|e| e.0)?;
+    /// Use the server at `url`: another Fane or a stable-diffusion.cpp server is added to
+    /// `[remotes]`; an Ollama (or other chat) server becomes the chat server (`[model] host`).
+    /// Returns (where, model).
+    pub async fn use_server(self: &Arc<Self>, url: &str, token: &str) -> Result<(String, String), String> {
+        let probe_url = if url.contains("://") || url.contains(':') {
+            discovery::normalize_host(url).map_err(|e| e.0)?
+        } else {
+            discovery::normalize_with_port(url, 11500).map_err(|e| e.0)?
+        };
+        let server = discovery::probe(&probe_url).await.map_err(|e| e.0)?;
+        if server.kind == "fane" || server.kind == "sd" {
+            let name = self.add_remote(&server.url, token).await?;
+            return Ok((name, String::new()));
+        }
         let mcfg = self.cfg().model;
         if choose_model(&mcfg, &server.models).is_none() {
-            return Err(format!(
-                "{url} has none of Fane's models. Pull one there first, e.g. ollama pull {}",
-                mcfg.name
-            ));
+            return Err(format!("{} has none of Fane's models (e.g. {}).", server.url, mcfg.name));
         }
+        let url = server.url.clone();
         set_value("model", "host", url.as_str()).map_err(|e| e.to_string())?;
         self.cfg.write().unwrap().model.host = url.clone();
         let mut llms = vec![self.llm.clone()];
@@ -933,16 +1267,30 @@ impl Core {
             llm.resolve_model().await.map_err(|e| e.to_string())?;
         }
         let model = self.llm.model();
-        tracing::info!("switched to Ollama at {url} (model {model})");
-        self.notify(format!("Fane now uses Ollama at {url} ({model})"));
+        tracing::info!("switched to the server at {url} (model {model})");
+        self.notify(format!("Fane now uses {url} ({model})"));
         Ok((url, model))
+    }
+
+    /// Go back to Fane's own models for chat (clear `[model] host`).
+    pub async fn use_own_models(self: &Arc<Self>) -> Result<String, String> {
+        set_value("model", "host", "").map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().model.host.clear();
+        let host = self.cfg().llm_host();
+        self.llm.set_host(&host);
+        self.suggest_llm.set_host(&host);
+        self.resolve_models(true).await;
+        self.models_changed().await;
+        Ok(format!("Fane uses its own models ({})", self.llm.model()))
     }
 
     pub async fn status(&self) -> Value {
         let mb = self.mailbox.lock().await.clone();
         let cfg = self.cfg();
         json!({
-            "ollama_host": self.llm.host(),
+            "model_server": self.llm.host(),
+            "own_models": self.cfg().model.host.trim().is_empty(),
+            "serving_here": self.runtime.read().unwrap().is_some(),
             "model": self.llm.model(),
             "suggest_model": self.suggest_llm.model(),
             "mail_account": mb.as_ref().map(|m| m.address.clone()),
@@ -987,14 +1335,27 @@ impl Core {
                 let me = self.clone();
                 self.rt.spawn(async move { me.reload_mail_config().await });
             }
-            "ollama_use" => {
+            "server_use" | "ollama_use" => {
                 let me = self.clone();
                 let host = arg("host");
+                let token = arg("token");
                 self.rt.spawn(async move {
-                    if let Err(e) = me.use_ollama(&host).await {
+                    if let Err(e) = me.use_server(&host, &token).await {
                         me.notify(e);
                     }
                 });
+            }
+            "reload" => {
+                // `fane` commands changed the config: pick up models, routes and remotes.
+                if let Ok(fresh) = Config::load() {
+                    let mut cfg = self.cfg.write().unwrap();
+                    cfg.runtime = fresh.runtime;
+                    cfg.routes = fresh.routes;
+                    cfg.remotes = fresh.remotes;
+                    cfg.media = fresh.media;
+                }
+                let me = self.clone();
+                self.rt.spawn(async move { me.models_changed().await });
             }
             "quit" => self.ui(UiEvent::Quit),
             other => return json!({"ok": false, "error": format!("unknown command {other:?}")}),

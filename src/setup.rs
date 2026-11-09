@@ -1,50 +1,73 @@
-//! First-run setup: install Ollama if it's missing (with Ollama's official installer for this
-//! OS), start it, and download Fane's default model (Gemma 4 26B) if it isn't there yet.
+//! Setup: get llama.cpp (and, if wanted, stable-diffusion.cpp) for this computer's GPUs and
+//! the models Fane uses. Models Ollama has already downloaded are used where they are; only
+//! what's missing is downloaded, into `~/.fane/models`. Nothing that's already set up is
+//! replaced.
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use crate::config::{Config, Role};
+use crate::runtime::catalog;
+use crate::runtime::gpu::{self, Backend, Gpu};
+use crate::runtime::install;
 
-use serde_json::{Value, json};
+pub use crate::runtime::download::Progress;
 
-use crate::config::ModelCfg;
-use crate::llm::find_installed;
+/// What to set up beyond the everyday model.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Want {
+    pub code: bool,
+    pub images: bool,
+    pub video: bool,
+}
 
-#[cfg(target_os = "linux")]
-const INSTALL_SH: &str = "https://ollama.com/install.sh";
-#[cfg(target_os = "windows")]
-const WINDOWS_SETUP: &str = "https://ollama.com/download/OllamaSetup.exe";
-#[cfg(target_os = "macos")]
-const MACOS_ZIP: &str = "https://ollama.com/download/Ollama-darwin.zip";
-
-/// What setup still has to do on this machine.
+/// What setup still has to do on this computer.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Plan {
-    pub host: String,
-    /// Ollama isn't installed here.
-    pub install: bool,
-    /// Ollama is installed (or about to be) but not answering.
-    pub start: bool,
-    /// The model to download, if it's missing (or might be, when Ollama isn't running yet).
-    pub model: Option<String>,
+    pub llama: Vec<Backend>,
+    pub models: Vec<String>,
+    pub sd: Vec<Backend>,
+    pub media: Vec<String>,
+    /// Things worth saying that aren't work (e.g. reusing Ollama's download).
+    pub notes: Vec<String>,
 }
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
-        !self.install && !self.start && self.model.is_none()
+        self.llama.is_empty() && self.models.is_empty() && self.sd.is_empty() && self.media.is_empty()
     }
 
-    /// One line for a confirmation prompt or card.
-    pub fn describe(&self) -> String {
-        let mut parts = vec![];
-        if self.install {
-            parts.push("install Ollama".to_string());
-        } else if self.start {
-            parts.push("start Ollama".to_string());
+    /// The steps as short phrases.
+    pub fn steps(&self, cfg: &Config) -> Vec<String> {
+        let mut steps = vec![];
+        for b in &self.llama {
+            steps.push(format!("get llama.cpp ({})", backend_label(*b)));
         }
-        if let Some(m) = &self.model {
-            parts.push(format!("download {m}{}", size_hint(m)));
+        for m in &self.models {
+            let missing = catalog::missing_llm_files(m, &cfg.runtime);
+            let reused = catalog::resolve_llm(m, &cfg.runtime).is_some();
+            steps.push(if reused && !missing.is_empty() {
+                format!("download a small speed-up file for {m}")
+            } else {
+                format!("download {m}{}", size_hint(m))
+            });
         }
-        let mut s = parts.join(" and ");
+        for b in &self.sd {
+            steps.push(format!("get stable-diffusion.cpp ({})", backend_label(*b)));
+        }
+        for m in &self.media {
+            if let Some(s) = catalog::sd_spec(m) {
+                steps.push(format!("download {} ({})", s.label, catalog::sd_download_size(s)));
+            }
+        }
+        steps
+    }
+
+    /// One sentence for a confirmation prompt or card.
+    pub fn describe(&self, cfg: &Config) -> String {
+        let steps = self.steps(cfg);
+        let mut s = match steps.len() {
+            0 => String::new(),
+            1 => steps[0].clone(),
+            n => format!("{}, and {}", steps[..n - 1].join(", "), steps[n - 1]),
+        };
         if let Some(first) = s.get(..1) {
             s = first.to_uppercase() + &s[1..];
         }
@@ -52,8 +75,28 @@ impl Plan {
     }
 }
 
+fn backend_label(b: Backend) -> &'static str {
+    match b {
+        Backend::Cuda => "NVIDIA CUDA",
+        Backend::Vulkan => "Vulkan",
+        Backend::Metal => "Apple Metal",
+        Backend::Cpu => "CPU",
+    }
+}
+
 fn size_hint(model: &str) -> &'static str {
-    if model.starts_with("gemma4:26b") { " (about 18 GB)" } else { "" }
+    match model {
+        "gemma4:26b" => " (about 16 GB)",
+        "qwen3.8:27b" => " (about 19 GB)",
+        _ => "",
+    }
+}
+
+/// Is `host` an Ollama server on this computer (the setting from before Fane ran models
+/// itself)?
+pub fn is_local_ollama(host: &str) -> bool {
+    let h = host.trim();
+    !h.is_empty() && is_local(h) && url::Url::parse(h).ok().and_then(|u| u.port()) == Some(11434)
 }
 
 pub fn is_local(host: &str) -> bool {
@@ -63,442 +106,165 @@ pub fn is_local(host: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn client(read_timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .read_timeout(read_timeout)
-        .build()
-        .unwrap_or_else(|_| crate::llm::http_client(read_timeout))
+/// Whether a role's work happens on this computer (its route starts with "local").
+fn local_role(cfg: &Config, role: Role) -> bool {
+    cfg.routes.for_role(role).first().is_some_and(|t| t == "local")
 }
 
-async fn version(host: &str) -> Option<String> {
-    let r = client(Duration::from_secs(3)).get(format!("{host}/api/version")).send().await.ok()?;
-    let v: Value = r.json().await.ok()?;
-    v["version"].as_str().map(String::from)
+/// What's missing for the configured models (and the extras in `want`).
+pub fn plan(cfg: &Config, want: Want) -> Plan {
+    install::set_home(cfg.runtime.home_dir());
+    let gpus = gpu::detect();
+    plan_with(cfg, want, &gpus)
 }
 
-async fn models(host: &str) -> Result<Vec<String>, String> {
-    let r = client(Duration::from_secs(10))
-        .get(format!("{host}/api/tags"))
-        .send()
-        .await
-        .map_err(|e| format!("Ollama at {host} isn't answering: {e}"))?;
-    let v: Value = r.json().await.map_err(|e| format!("bad reply from Ollama: {e}"))?;
-    Ok(v["models"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|m| m["name"].as_str().map(String::from)).collect())
-        .unwrap_or_default())
-}
-
-/// Where Ollama is installed on this machine, if it is.
-pub fn ollama_binary() -> Option<PathBuf> {
-    if let Ok(p) = which::which("ollama") {
-        return Some(p);
+pub fn plan_with(cfg: &Config, want: Want, gpus: &[Gpu]) -> Plan {
+    let mut plan = Plan::default();
+    let mut llm_roles = vec![];
+    if cfg.model.host.trim().is_empty() && local_role(cfg, Role::Chat) {
+        llm_roles.push((Role::Chat, cfg.model.name.clone()));
     }
-    let home = dirs::home_dir().unwrap_or_default();
-    let candidates: Vec<PathBuf> = if cfg!(target_os = "macos") {
-        vec![
-            PathBuf::from("/Applications/Ollama.app/Contents/Resources/ollama"),
-            home.join("Applications/Ollama.app/Contents/Resources/ollama"),
-        ]
-    } else if cfg!(target_os = "windows") {
-        let local = dirs::data_local_dir().unwrap_or_else(|| home.join("AppData/Local"));
-        vec![local.join("Programs/Ollama/ollama.exe")]
-    } else {
-        vec![PathBuf::from("/usr/local/bin/ollama"), PathBuf::from("/usr/bin/ollama")]
-    };
-    candidates.into_iter().find(|p| p.is_file())
-}
-
-/// What's missing for `cfg` (Ollama server and the configured model). Errors only when the
-/// configured server is another computer that isn't answering: Fane can't install there.
-pub async fn plan(cfg: &ModelCfg) -> Result<Plan, String> {
-    let host = cfg.host.trim_end_matches('/').to_string();
-    let mut plan = Plan { host: host.clone(), ..Default::default() };
-    if version(&host).await.is_some() {
-        let installed = models(&host).await?;
-        if find_installed(&cfg.name, &installed).is_none() {
-            plan.model = Some(cfg.name.clone());
+    if want.code && !cfg.model.code.is_empty() {
+        llm_roles.push((Role::Code, cfg.model.code.clone()));
+    }
+    for (role, model) in llm_roles {
+        let gpu = gpu::pick(gpus, cfg.runtime.gpu_for(role));
+        let backend = install::llama_backend_for(gpu.backend());
+        if install::installed_llama(backend).is_none() && !plan.llama.contains(&backend) {
+            plan.llama.push(backend);
         }
-        return Ok(plan);
-    }
-    if !is_local(&host) {
-        return Err(format!(
-            "the Ollama server at {host} isn't answering; start it there, or pick another in Settings"
-        ));
-    }
-    plan.install = ollama_binary().is_none();
-    plan.start = true;
-    plan.model = Some(cfg.name.clone());
-    Ok(plan)
-}
-
-pub type Progress<'a> = &'a (dyn Fn(&str) + Send + Sync);
-
-/// Carry out `plan`. `gui`: no terminal to ask for a password in (Linux uses pkexec).
-pub async fn run(plan: &Plan, gui: bool, progress: Progress<'_>) -> Result<(), String> {
-    if plan.install {
-        install_ollama(gui, progress).await?;
-    }
-    if plan.start || plan.install {
-        start_ollama(&plan.host, progress).await?;
-    }
-    if let Some(model) = &plan.model {
-        // When Ollama wasn't running we didn't know what it has; check now.
-        let installed = models(&plan.host).await?;
-        if find_installed(model, &installed).is_none() {
-            pull(&plan.host, model, progress).await?;
+        let reused = catalog::resolve_llm(&model, &cfg.runtime).filter(|f| f.source == "ollama").is_some();
+        if reused {
+            plan.notes.push(format!("using Ollama's copy of {model}"));
+        }
+        let have = catalog::resolve_llm(&model, &cfg.runtime).is_some();
+        let missing = !catalog::missing_llm_files(&model, &cfg.runtime).is_empty();
+        if (!have || missing) && !plan.models.contains(&model) {
+            plan.models.push(model);
         }
     }
-    Ok(())
-}
-
-async fn download(url: &str, dest: &Path, what: &str, progress: Progress<'_>) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-    let mut resp = client(Duration::from_secs(120))
-        .get(url)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("couldn't download {what}: {e}"))?;
-    let total = resp.content_length();
-    let mut file = tokio::fs::File::create(dest).await.map_err(|e| format!("can't write {}: {e}", dest.display()))?;
-    let (mut done, mut last) = (0u64, Instant::now());
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("download of {what} failed: {e}"))? {
-        file.write_all(&chunk).await.map_err(|e| format!("can't write {}: {e}", dest.display()))?;
-        done += chunk.len() as u64;
-        if last.elapsed() > Duration::from_millis(500) {
-            last = Instant::now();
-            progress(&format!("Downloading {what}… {}", amount(done, total)));
+    for (role, wanted) in [(Role::Image, want.images), (Role::Video, want.video)] {
+        let name = match role {
+            Role::Image => &cfg.runtime.image_model,
+            _ => &cfg.runtime.video_model,
+        };
+        let Some(spec) = catalog::sd_spec(name).filter(|_| wanted) else { continue };
+        let gpu = gpu::pick(gpus, cfg.runtime.gpu_for(role));
+        let backend = install::llama_backend_for(gpu.backend());
+        let have_build = install::installed_sd(backend).is_some()
+            || (backend == Backend::Cuda && install::installed_sd(Backend::Vulkan).is_some());
+        if !have_build && !plan.sd.contains(&backend) {
+            plan.sd.push(backend);
+        }
+        if !catalog::sd_installed(spec) {
+            plan.media.push(spec.name.to_string());
         }
     }
-    file.flush().await.map_err(|e| e.to_string())?;
-    Ok(())
+    plan
 }
 
-fn gb(bytes: u64) -> String {
-    format!("{:.1} GB", bytes as f64 / 1e9)
-}
-
-fn amount(done: u64, total: Option<u64>) -> String {
-    match total {
-        Some(t) if t > 0 => format!("{} of {} ({}%)", gb(done), gb(t), done * 100 / t),
-        _ => gb(done),
-    }
-}
-
-async fn run_installer(mut cmd: tokio::process::Command, what: &str) -> Result<(), String> {
-    let status = cmd.status().await.map_err(|e| format!("couldn't start {what}: {e}"))?;
-    if status.success() { Ok(()) } else { Err(format!("{what} failed ({status})")) }
-}
-
-async fn install_ollama(gui: bool, progress: Progress<'_>) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("fane-setup-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let result = install_in(&dir, gui, progress).await;
-    let _ = std::fs::remove_dir_all(&dir);
-    result?;
-    progress("Ollama is installed.");
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-async fn install_in(dir: &Path, gui: bool, progress: Progress<'_>) -> Result<(), String> {
-    // Ollama's official script: installs to /usr/local and sets up a systemd service.
-    let missing: Vec<&str> = ["curl", "zstd"].into_iter().filter(|t| which::which(t).is_err()).collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "Ollama's installer needs {}; install with: sudo apt install {}",
-            missing.join(" and "),
-            missing.join(" ")
-        ));
-    }
-    let script = dir.join("install.sh");
-    download(INSTALL_SH, &script, "the Ollama installer", progress).await?;
-    progress("Installing Ollama (asks for your password)…");
-    let mut cmd = if gui {
-        if which::which("pkexec").is_err() {
-            return Err("installing Ollama needs administrator rights; run `fane setup` in a terminal".into());
-        }
-        let mut c = tokio::process::Command::new("pkexec");
-        c.arg("sh").arg(&script);
-        c
-    } else {
-        // The script asks for sudo itself when it needs it.
-        let mut c = tokio::process::Command::new("sh");
-        c.arg(&script);
-        c
-    };
-    cmd.stdin(if gui { std::process::Stdio::null() } else { std::process::Stdio::inherit() });
-    run_installer(cmd, "the Ollama installer").await
-}
-
-#[cfg(target_os = "macos")]
-async fn install_in(dir: &Path, _gui: bool, progress: Progress<'_>) -> Result<(), String> {
-    let zip = dir.join("Ollama-darwin.zip");
-    download(MACOS_ZIP, &zip, "Ollama", progress).await?;
-    progress("Installing Ollama…");
-    let mut unzip = tokio::process::Command::new("ditto");
-    unzip.args(["-x", "-k"]).arg(&zip).arg(dir);
-    run_installer(unzip, "unpacking Ollama").await?;
-    let system = PathBuf::from("/Applications");
-    let target = if is_writable(&system) {
-        system
-    } else {
-        let user = dirs::home_dir().unwrap_or_default().join("Applications");
-        std::fs::create_dir_all(&user).map_err(|e| e.to_string())?;
-        user
-    };
-    let dest = target.join("Ollama.app");
-    let _ = std::fs::remove_dir_all(&dest);
-    let mut mv = tokio::process::Command::new("mv");
-    mv.arg(dir.join("Ollama.app")).arg(&dest);
-    run_installer(mv, "moving Ollama to Applications").await
-}
-
-#[cfg(target_os = "macos")]
-fn is_writable(dir: &Path) -> bool {
-    let probe = dir.join(format!(".fane-probe-{}", std::process::id()));
-    let ok = std::fs::write(&probe, b"").is_ok();
-    let _ = std::fs::remove_file(&probe);
-    ok
-}
-
-#[cfg(target_os = "windows")]
-async fn install_in(dir: &Path, _gui: bool, progress: Progress<'_>) -> Result<(), String> {
-    // Per-user Inno Setup installer; no administrator rights needed.
-    let setup = dir.join("OllamaSetup.exe");
-    download(WINDOWS_SETUP, &setup, "Ollama", progress).await?;
-    progress("Installing Ollama…");
-    let mut cmd = tokio::process::Command::new(&setup);
-    cmd.args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]);
-    run_installer(cmd, "the Ollama installer").await
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-async fn install_in(_dir: &Path, _gui: bool, _progress: Progress<'_>) -> Result<(), String> {
-    Err("install Ollama from https://ollama.com/download".into())
-}
-
-/// Start the local server if it isn't answering, and wait (up to a minute) until it is.
-async fn start_ollama(host: &str, progress: Progress<'_>) -> Result<(), String> {
-    if version(host).await.is_some() {
-        return Ok(());
-    }
-    progress("Starting Ollama…");
-    let bin = ollama_binary().ok_or("Ollama isn't installed")?;
-    spawn_server(&bin);
-    if wait_for(host, Duration::from_secs(20)).await {
-        return Ok(());
-    }
-    // The desktop app can sit on a first-run dialog before it starts its server; run the
-    // server directly instead.
-    serve(&bin);
-    if wait_for(host, Duration::from_secs(40)).await {
-        return Ok(());
-    }
-    Err(format!("Ollama didn't start answering at {host}"))
-}
-
-async fn wait_for(host: &str, limit: Duration) -> bool {
-    let started = Instant::now();
-    while started.elapsed() < limit {
-        if version(host).await.is_some() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    false
-}
-
-fn spawn_server(bin: &Path) {
-    use std::process::Command;
-    // The desktop apps run the server themselves (and keep it running at login).
-    if cfg!(target_os = "macos")
-        && let Some(app) = bin.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"))
-    {
-        let _ = Command::new("open").arg("-a").arg(app).spawn();
-        return;
-    }
-    let tray = bin.with_file_name("ollama app.exe");
-    if cfg!(target_os = "windows") && tray.is_file() {
-        let _ = Command::new(tray).spawn();
-        return;
-    }
-    // Linux: the installer's systemd service normally runs it; otherwise run it ourselves.
-    if cfg!(target_os = "linux")
-        && Command::new("systemctl").args(["start", "ollama"]).status().is_ok_and(|s| s.success())
-    {
-        return;
-    }
-    serve(bin);
-}
-
-/// Run `ollama serve` in the background, detached from Fane.
-fn serve(bin: &Path) {
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new(bin);
-    cmd.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let _ = cmd.spawn();
-}
-
-/// Download `model` through Ollama's API, reporting progress.
-pub async fn pull(host: &str, model: &str, progress: Progress<'_>) -> Result<(), String> {
-    progress(&format!("Downloading {model}…"));
-    let mut resp = client(Duration::from_secs(300))
-        .post(format!("{host}/api/pull"))
-        .json(&json!({"model": model, "stream": true}))
-        .send()
-        .await
-        .map_err(|e| format!("couldn't start downloading {model}: {e}"))?;
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Ollama couldn't download {model}: {}", crate::llm::truncate(&body, 200)));
-    }
-    let mut tracker = PullProgress::default();
-    let mut buf = Vec::new();
-    let mut last = Instant::now() - Duration::from_secs(1);
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("download of {model} failed: {e}"))? {
-        buf.extend_from_slice(&chunk);
-        while let Some(i) = buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=i).collect();
-            let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
-            if let Some(e) = event["error"].as_str() {
-                return Err(format!("Ollama couldn't download {model}: {e}"));
+/// Carry out `plan`. A CUDA build that can't be had falls back to Vulkan on the same card.
+pub async fn run(plan: &Plan, cfg: &Config, progress: Progress<'_>) -> Result<(), String> {
+    install::set_home(cfg.runtime.home_dir());
+    let build = |s: &str| s.to_string();
+    for &backend in &plan.llama {
+        match install::install_llama(backend, &build(&cfg.runtime.llama_build), progress).await {
+            Ok(_) => {}
+            Err(e) if backend == Backend::Cuda => {
+                tracing::warn!("{e}; using Vulkan instead");
+                progress(&format!("{e}; using Vulkan instead"));
+                install::install_llama(Backend::Vulkan, &build(&cfg.runtime.llama_build), progress).await?;
             }
-            tracker.update(&event);
-            if tracker.success {
-                progress(&format!("{model} is ready."));
-                return Ok(());
-            }
-            if last.elapsed() > Duration::from_millis(500) {
-                last = Instant::now();
-                progress(&format!("Downloading {model}… {}", tracker.text()));
-            }
+            Err(e) => return Err(e),
         }
     }
-    if tracker.success { Ok(()) } else { Err(format!("the download of {model} stopped before it finished")) }
-}
-
-/// Sums Ollama's per-layer pull events into one figure.
-#[derive(Debug, Default)]
-pub struct PullProgress {
-    layers: std::collections::BTreeMap<String, (u64, u64)>,
-    status: String,
-    pub success: bool,
-}
-
-impl PullProgress {
-    pub fn update(&mut self, event: &Value) {
-        let status = event["status"].as_str().unwrap_or("");
-        self.success |= status == "success";
-        self.status = status.to_string();
-        if let (Some(digest), Some(total)) = (event["digest"].as_str(), event["total"].as_u64()) {
-            let done = event["completed"].as_u64().unwrap_or(0);
-            self.layers.insert(digest.to_string(), (done.min(total), total));
+    for model in &plan.models {
+        catalog::download_llm(model, &cfg.runtime, progress).await?;
+    }
+    for &backend in &plan.sd {
+        match install::install_sd(backend, &build(&cfg.runtime.sd_build), progress).await {
+            Ok(_) => {}
+            Err(e) if backend == Backend::Cuda => {
+                tracing::warn!("{e}; trying Vulkan");
+                progress("No CUDA build of stable-diffusion.cpp for this system; using Vulkan…");
+                install::install_sd(Backend::Vulkan, &build(&cfg.runtime.sd_build), progress).await?;
+            }
+            Err(e) => return Err(e),
         }
     }
-
-    pub fn text(&self) -> String {
-        let (done, total) = self.layers.values().fold((0, 0), |(d, t), (ld, lt)| (d + ld, t + lt));
-        if total > 0 { amount(done, Some(total)) } else { self.status.clone() }
+    for name in &plan.media {
+        if let Some(spec) = catalog::sd_spec(name) {
+            catalog::download_sd(spec, progress).await?;
+        }
     }
+    progress("Done.");
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn gpus() -> Vec<Gpu> {
+        vec![
+            Gpu {
+                id: "cuda:0".into(),
+                name: "V100".into(),
+                vram_mb: 32768,
+                integrated: false,
+                cuda: Some(0),
+                vulkan: Some(1),
+            },
+            Gpu {
+                id: "vulkan:0".into(),
+                name: "Iris Xe".into(),
+                vram_mb: 40000,
+                integrated: true,
+                cuda: None,
+                vulkan: Some(0),
+            },
+            Gpu::cpu(),
+        ]
+    }
+
+    fn empty_home() -> Config {
+        let mut cfg = Config::default();
+        let home = std::env::temp_dir().join(format!("fane-setup-{}", std::process::id()));
+        cfg.runtime.home = home.display().to_string();
+        cfg.runtime.reuse_ollama = false;
+        install::set_home(home);
+        cfg
+    }
+
     #[test]
-    fn describes_plans() {
-        let p = Plan { install: true, start: true, model: Some("gemma4:26b".into()), ..Default::default() };
-        assert_eq!(p.describe(), "Install Ollama and download gemma4:26b (about 18 GB)");
-        let p = Plan { start: true, ..Default::default() };
-        assert_eq!(p.describe(), "Start Ollama");
-        assert!(Plan::default().is_empty());
+    fn plans_what_is_missing() {
+        let mut cfg = empty_home();
+        cfg.runtime.chat_gpu = "vulkan:0".into();
+        let p = plan_with(&cfg, Want { code: true, images: true, video: false }, &gpus());
+        assert_eq!(p.llama, vec![Backend::Vulkan, Backend::Cuda], "chat on the Iris Xe, code on the V100");
+        assert_eq!(p.models, vec!["gemma4:26b", "qwen3.8:27b"]);
+        assert_eq!(p.sd, vec![Backend::Cuda]);
+        assert_eq!(p.media, vec!["z-image-turbo"]);
+        let text = p.describe(&cfg);
+        assert!(text.starts_with("Get llama.cpp (Vulkan), get llama.cpp (NVIDIA CUDA), download gemma4:26b"), "{text}");
+        assert!(text.ends_with("and download Z-Image Turbo (images) (about 11 GB)"), "{text}");
+    }
+
+    #[test]
+    fn nothing_for_a_server_elsewhere() {
+        let mut cfg = empty_home();
+        cfg.model.host = "http://192.168.1.20:11434".into();
+        assert!(plan_with(&cfg, Want::default(), &gpus()).is_empty());
+        cfg.model.host = String::new();
+        cfg.routes.chat = vec!["nuc".into()];
+        assert!(plan_with(&cfg, Want::default(), &gpus()).is_empty(), "chat runs on another computer");
     }
 
     #[test]
     fn local_hosts() {
         assert!(is_local("http://127.0.0.1:11434") && is_local("http://localhost:11434"));
         assert!(!is_local("http://192.168.1.20:11434"));
-    }
-
-    #[test]
-    fn pull_progress_sums_layers() {
-        let mut p = PullProgress::default();
-        p.update(&json!({"status": "pulling manifest"}));
-        assert_eq!(p.text(), "pulling manifest");
-        p.update(
-            &json!({"status": "pulling a", "digest": "a", "total": 8_000_000_000u64, "completed": 2_000_000_000u64}),
-        );
-        p.update(&json!({"status": "pulling b", "digest": "b", "total": 2_000_000_000u64, "completed": 0}));
-        assert_eq!(p.text(), "2.0 GB of 10.0 GB (20%)");
-        p.update(&json!({"status": "success"}));
-        assert!(p.success);
-    }
-
-    /// A fake Ollama that has `models` and streams a short pull.
-    async fn fake(models: &'static str) -> (String, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else { return };
-                let mut buf = [0u8; 4096];
-                let n = sock.read(&mut buf).await.unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let body = if req.starts_with("GET /api/version") {
-                    r#"{"version":"0.99.0"}"#.to_string()
-                } else if req.starts_with("GET /api/tags") {
-                    format!(r#"{{"models":[{models}]}}"#)
-                } else {
-                    concat!(
-                        "{\"status\":\"pulling manifest\"}\n",
-                        "{\"status\":\"pulling x\",\"digest\":\"x\",\"total\":100,\"completed\":50}\n",
-                        "{\"status\":\"success\"}\n"
-                    )
-                    .to_string()
-                };
-                let resp =
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                let _ = sock.write_all(resp.as_bytes()).await;
-            }
-        });
-        (url, task)
-    }
-
-    #[tokio::test]
-    async fn plans_and_pulls_against_a_running_server() {
-        let cfg = |host: &str| ModelCfg { host: host.into(), name: "gemma4:26b".into(), ..Default::default() };
-        let (have, t1) = fake(r#"{"name":"gemma4:26b"}"#).await;
-        assert!(plan(&cfg(&have)).await.unwrap().is_empty());
-        let (missing, t2) = fake(r#"{"name":"llama3:8b"}"#).await;
-        let p = plan(&cfg(&missing)).await.unwrap();
-        assert_eq!(p.model.as_deref(), Some("gemma4:26b"));
-        assert!(!p.install && !p.start);
-        let seen = std::sync::Mutex::new(vec![]);
-        pull(&missing, "gemma4:26b", &|s: &str| seen.lock().unwrap().push(s.to_string())).await.unwrap();
-        assert_eq!(seen.lock().unwrap().last().unwrap(), "gemma4:26b is ready.");
-        t1.abort();
-        t2.abort();
-    }
-
-    #[tokio::test]
-    async fn remote_server_down_is_an_error() {
-        let cfg = ModelCfg { host: "http://192.0.2.1:11434".into(), ..Default::default() };
-        assert!(plan(&cfg).await.unwrap_err().contains("isn't answering"));
+        assert!(is_local_ollama("http://127.0.0.1:11434") && !is_local_ollama("http://127.0.0.1:11500"));
+        assert!(!is_local_ollama(""));
     }
 }

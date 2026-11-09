@@ -1,7 +1,8 @@
-//! Find Ollama servers on this computer and the local network.
+//! Find model servers on this computer and the local network: other computers running Fane
+//! (which share their models), Ollama, llama.cpp's server and stable-diffusion.cpp's server.
 //!
-//! Ollama doesn't advertise itself (no mDNS), so this probes the default port on every
-//! address of the local subnets, then confirms each hit with Ollama's own API.
+//! None of them advertise themselves (no mDNS), so this probes their default ports on every
+//! address of the local subnets, then confirms each hit with the server's own API.
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -12,16 +13,22 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub const DEFAULT_PORT: u16 = 11434;
+/// Fane's model server, Ollama, stable-diffusion.cpp's server, llama.cpp's server.
+pub const SCAN_PORTS: [u16; 4] = [11500, 11434, 1234, 8080];
 /// Container/VM bridges: anything on them is reachable through localhost anyway.
 const SKIP_IFACES: [&str; 7] = ["lo", "docker", "br-", "veth", "virbr", "podman", "lxc"];
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub struct NotOllama(pub String);
+pub struct NotServer(pub String);
 
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct OllamaServer {
+pub struct Server {
     pub url: String,
+    /// "fane", "ollama", "openai" (llama.cpp and the like) or "sd".
+    pub kind: String,
+    /// A Fane that wants its sharing token before it says more.
+    pub locked: bool,
     /// Reverse-DNS name, if any.
     pub name: String,
     pub version: String,
@@ -32,7 +39,7 @@ pub struct OllamaServer {
     pub aliases: Vec<String>,
 }
 
-impl OllamaServer {
+impl Server {
     /// True if the `host` setting points at this server.
     pub fn matches(&self, host: &str) -> bool {
         std::iter::once(&self.url).chain(&self.aliases).any(|u| same_server(u, host))
@@ -53,18 +60,74 @@ impl OllamaServer {
     }
 }
 
+/// A server's kind and models, as Fane routes to it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found {
+    /// "fane", "openai" (Ollama and other OpenAI-compatible servers) or "sd".
+    pub kind: String,
+    pub models: Vec<String>,
+}
+
+/// What a configured remote is (`kind` "" = find out) and which models it has. Fane remotes
+/// are asked with their sharing token.
+pub async fn identify(url: &str, token: &str, kind: &str) -> Result<Found, String> {
+    let c = client(Duration::from_secs(5));
+    let url = url.trim_end_matches('/');
+    let get = |path: &str| {
+        let mut r = c.get(format!("{url}{path}"));
+        if !token.is_empty() {
+            r = r.bearer_auth(token);
+        }
+        async move {
+            let r = r.send().await.map_err(|e| format!("{url} isn't answering ({})", self::kind(&e)))?;
+            if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(format!("{url} wants a different sharing token"));
+            }
+            let r = r.error_for_status().map_err(|e| format!("{url}: {e}"))?;
+            r.json::<Value>().await.map_err(|_| format!("{url} answered, but not like a model server"))
+        }
+    };
+    let models_of = |v: &Value| -> Vec<String> {
+        v["data"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    let kind = if kind.is_empty() {
+        if get("/fane/v1/info").await.is_ok_and(|v| v.get("fane").is_some()) {
+            "fane"
+        } else if get("/sdcpp/v1/models/status").await.is_ok_and(|v| v.get("state").is_some()) {
+            "sd"
+        } else {
+            "openai"
+        }
+    } else if kind == "ollama" {
+        "openai"
+    } else {
+        kind
+    };
+    let models = match kind {
+        "sd" => {
+            get("/sdcpp/v1/models/status").await?;
+            vec![]
+        }
+        _ => models_of(&get("/v1/models").await?),
+    };
+    Ok(Found { kind: kind.to_string(), models })
+}
+
 /// '192.168.1.5' -> 'http://192.168.1.5:11434'; keeps an explicit scheme and port.
-pub fn normalize_host(text: &str) -> Result<String, NotOllama> {
+pub fn normalize_host(text: &str) -> Result<String, NotServer> {
     normalize_with_port(text, DEFAULT_PORT)
 }
 
-fn normalize_with_port(text: &str, port: u16) -> Result<String, NotOllama> {
+pub fn normalize_with_port(text: &str, port: u16) -> Result<String, NotServer> {
     let text = text.trim();
     if text.is_empty() {
-        return Err(NotOllama("enter an address, e.g. 192.168.1.20".into()));
+        return Err(NotServer("enter an address, e.g. 192.168.1.20".into()));
     }
     let with_scheme = if text.contains("://") { text.to_string() } else { format!("http://{text}") };
-    let bad = || NotOllama(format!("not an address: {text}"));
+    let bad = || NotServer(format!("not an address: {text}"));
     let url = url::Url::parse(&with_scheme).map_err(|_| bad())?;
     let host = url.host_str().filter(|h| !h.is_empty()).ok_or_else(bad)?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -146,11 +209,11 @@ fn client(timeout: Duration) -> reqwest::Client {
 }
 
 /// Ask `url` for its Ollama version and models. Errors if it isn't an Ollama server.
-pub async fn probe(url: &str) -> Result<OllamaServer, NotOllama> {
+pub async fn probe(url: &str) -> Result<Server, NotServer> {
     probe_with(&client(Duration::from_secs(3)), url).await
 }
 
-async fn probe_with(c: &reqwest::Client, url: &str) -> Result<OllamaServer, NotOllama> {
+async fn probe_with(c: &reqwest::Client, url: &str) -> Result<Server, NotServer> {
     let get = |path: &str| {
         let full = format!("{url}{path}");
         async move {
@@ -158,22 +221,65 @@ async fn probe_with(c: &reqwest::Client, url: &str) -> Result<OllamaServer, NotO
                 .get(&full)
                 .send()
                 .await
-                .map_err(|e| NotOllama(format!("no Ollama answering at {url} ({})", kind(&e))))?;
-            let r = r.error_for_status().map_err(|_| NotOllama(format!("{url} answered, but it isn't Ollama")))?;
-            r.json::<Value>().await.map_err(|_| NotOllama(format!("{url} answered, but it isn't Ollama")))
+                .map_err(|e| NotServer(format!("nothing answering at {url} ({})", kind(&e))))?;
+            let r =
+                r.error_for_status().map_err(|_| NotServer(format!("{url} answered, but it isn't a model server")))?;
+            r.json::<Value>().await.map_err(|_| NotServer(format!("{url} answered, but it isn't a model server")))
         }
     };
-    let version = get("/api/version").await?;
-    let version = version["version"]
-        .as_str()
-        .ok_or_else(|| NotOllama(format!("{url} answered, but it isn't Ollama")))?
-        .to_string();
-    let tags = get("/api/tags").await?;
-    let models = tags["models"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|m| m["name"].as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    Ok(OllamaServer { url: url.to_string(), version, models, ..Default::default() })
+    let names = |v: &Value, list: &str, key: &str| -> Vec<String> {
+        v[list]
+            .as_array()
+            .map(|a| a.iter().filter_map(|m| m[key].as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    // Fane first (it also answers /v1/models), then Ollama, then the rest.
+    if let Ok(info) = get("/fane/v1/info").await
+        && let Some(version) = info["fane"].as_str()
+    {
+        let models = info["models"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|m| m.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        return Ok(Server {
+            url: url.to_string(),
+            kind: "fane".into(),
+            locked: info["locked"].as_bool().unwrap_or(false),
+            name: info["name"].as_str().unwrap_or("").to_string(),
+            version: version.to_string(),
+            models,
+            ..Default::default()
+        });
+    }
+    match get("/api/version").await {
+        Ok(v) if v["version"].is_string() => {
+            let tags = get("/api/tags").await?;
+            return Ok(Server {
+                url: url.to_string(),
+                kind: "ollama".into(),
+                version: v["version"].as_str().unwrap_or("").to_string(),
+                models: names(&tags, "models", "name"),
+                ..Default::default()
+            });
+        }
+        Err(e) if e.0.starts_with("nothing answering") => return Err(e),
+        _ => {}
+    }
+    if let Ok(status) = get("/sdcpp/v1/models/status").await
+        && status.get("state").is_some()
+    {
+        let recipe = status["recipe"].as_str().map(String::from).into_iter().collect();
+        return Ok(Server { url: url.to_string(), kind: "sd".into(), models: recipe, ..Default::default() });
+    }
+    match get("/v1/models").await {
+        Ok(v) if v["data"].is_array() => Ok(Server {
+            url: url.to_string(),
+            kind: "openai".into(),
+            models: names(&v, "data", "id"),
+            ..Default::default()
+        }),
+        _ => Err(NotServer(format!("{url} answered, but it isn't a model server"))),
+    }
 }
 
 fn kind(e: &reqwest::Error) -> &'static str {
@@ -198,11 +304,21 @@ async fn hostname(ip: IpAddr) -> String {
 ///
 /// `extra` URLs (e.g. the configured host, which may be on another network) are always
 /// probed too.
-pub async fn discover(extra: &[String]) -> Vec<OllamaServer> {
-    discover_on(extra, DEFAULT_PORT, Duration::from_millis(500)).await
+pub async fn discover(extra: &[String]) -> Vec<Server> {
+    let found =
+        futures::future::join_all(SCAN_PORTS.iter().map(|&port| discover_on(extra, port, Duration::from_millis(500))))
+            .await;
+    let mut all: Vec<Server> = vec![];
+    for s in found.into_iter().flatten() {
+        if !all.iter().any(|a| same_server(&a.url, &s.url)) {
+            all.push(s);
+        }
+    }
+    all.sort_by_key(|s| (!s.local, s.kind != "fane", s.label().to_lowercase()));
+    all
 }
 
-pub async fn discover_on(extra: &[String], port: u16, timeout: Duration) -> Vec<OllamaServer> {
+pub async fn discover_on(extra: &[String], port: u16, timeout: Duration) -> Vec<Server> {
     let nets = tokio::task::spawn_blocking(local_networks).await.unwrap_or_default();
     let (targets, own) = scan_targets(&nets);
     let total = targets.len();
@@ -212,13 +328,17 @@ pub async fn discover_on(extra: &[String], port: u16, timeout: Duration) -> Vec<
         .filter_map(|x| async move { x })
         .collect()
         .await;
-    tracing::info!("scanned {total} addresses for Ollama on port {port}: {} answered", hits.len());
+    tracing::info!("scanned {total} addresses on port {port}: {} answered", hits.len());
 
     let mut urls = vec![format!("http://127.0.0.1:{port}")];
     urls.extend(hits.iter().map(|h| format!("http://{h}:{port}")));
     let mut aliases: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for given in extra {
         let Ok(url) = normalize_with_port(given, port) else { continue };
+        // Only addresses meant for this port (or without one).
+        if !given.is_empty() && url::Url::parse(&url).ok().and_then(|u| u.port()) != Some(port) {
+            continue;
+        }
         let mut parsed = url::Url::parse(&url).expect("normalized URL parses");
         let own_addr = parsed.host_str().and_then(|h| h.parse::<Ipv4Addr>().ok()).is_some_and(|ip| own.contains(&ip));
         if own_addr {
@@ -245,8 +365,12 @@ pub async fn discover_on(extra: &[String], port: u16, timeout: Duration) -> Vec<
                 }
             };
             server.local = server.address().starts_with("127.");
+            if server.local && server.kind == "fane" {
+                return None; // this Fane itself
+            }
             server.aliases = aliases.get(url).cloned().unwrap_or_default();
             if !server.local
+                && server.name.is_empty()
                 && let Ok(ip) = server.address().parse::<IpAddr>()
             {
                 server.name = hostname(ip).await;
@@ -255,7 +379,7 @@ pub async fn discover_on(extra: &[String], port: u16, timeout: Duration) -> Vec<
         }
     }))
     .await;
-    let mut found: Vec<OllamaServer> = found.into_iter().flatten().collect();
+    let mut found: Vec<Server> = found.into_iter().flatten().collect();
     found.sort_by_key(|s| (!s.local, s.label().to_lowercase()));
     found
 }
@@ -291,7 +415,7 @@ mod tests {
 
     #[test]
     fn server_matches_aliases() {
-        let s = OllamaServer {
+        let s = Server {
             url: "http://127.0.0.1:11434".into(),
             local: true,
             aliases: vec!["http://192.168.1.173:11434".into()],
@@ -332,7 +456,7 @@ mod tests {
                 let mut buf = [0u8; 2048];
                 let n = sock.read(&mut buf).await.unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
-                let body = if !ollama {
+                let body = if !ollama || req.starts_with("GET /fane") || req.starts_with("GET /sdcpp") {
                     "<html>router login</html>".to_string()
                 } else if req.starts_with("GET /api/version") {
                     r#"{"version":"0.99.0"}"#.into()
@@ -351,7 +475,7 @@ mod tests {
     async fn probe_fake_ollama() {
         let (url, task) = fake_server(true).await;
         let s = probe(&url).await.unwrap();
-        assert_eq!(s.version, "0.99.0");
+        assert_eq!((s.version.as_str(), s.kind.as_str()), ("0.99.0", "ollama"));
         assert_eq!(s.models, vec!["gemma4:31b", "llama3:8b"]);
         task.abort();
     }
@@ -359,9 +483,9 @@ mod tests {
     #[tokio::test]
     async fn probe_rejects_other_servers() {
         let (url, task) = fake_server(false).await;
-        assert!(probe(&url).await.unwrap_err().0.contains("isn't Ollama"));
+        assert!(probe(&url).await.unwrap_err().0.contains("isn't a model server"));
         task.abort();
         let _ = task.await;
-        assert!(probe(&url).await.unwrap_err().0.contains("no Ollama answering"));
+        assert!(probe(&url).await.unwrap_err().0.contains("nothing answering"));
     }
 }

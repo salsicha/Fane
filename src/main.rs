@@ -15,6 +15,7 @@ mod llm;
 mod mail;
 mod platform;
 mod prefs;
+mod runtime;
 mod setup;
 mod snapshot;
 mod store;

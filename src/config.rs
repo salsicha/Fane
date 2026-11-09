@@ -7,16 +7,16 @@ use std::sync::LazyLock;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Recommended local vision models (Ollama tags), in default preference order.
-/// The recommended deployments: a local model and the coding harness it delegates to.
-pub const PAIRINGS: [(&str, &str); 3] =
-    [("gemma4:26b", "codegem"), ("qwen3.8:27b", "qwen"), ("openbmb/minicpm-v4.7:35b-a3b", "deepseek")];
+/// Fane's everyday model (chat, suggestions, tools) and its model for coding tasks.
+pub const DEFAULT_MODEL: &str = "gemma4:26b";
+pub const CODE_MODEL: &str = "qwen3.8:27b";
 
-/// Each is paired with a coding harness for delegation (see `PAIRINGS`).
-pub const RECOMMENDED_MODELS: [&str; 3] = [
-    "gemma4:26b",                   // Gemma 4 26B, native tools; harness: CodeGem
-    "qwen3.8:27b",                  // Qwen 3.8 27B, native tools; harness: Qwen Code
-    "openbmb/minicpm-v4.7:35b-a3b", // MiniCPM-V 4.7 35B MoE (3B active), harness: SuperQode DeepSeek (ds4-coding)
+/// Each recommended model and the coding harness that runs on it.
+pub const PAIRINGS: [(&str, &str); 2] = [("gemma4:26b", "codegem"), ("qwen3.8:27b", "qwen")];
+
+pub const RECOMMENDED_MODELS: [&str; 2] = [
+    DEFAULT_MODEL, // Gemma 4 26B (MoE, 4B active), native tools and vision; harness: CodeGem
+    CODE_MODEL,    // Qwen 3.8 27B, for coding; harness: Qwen Code
 ];
 
 pub static CONFIG_DIR: LazyLock<PathBuf> =
@@ -65,25 +65,34 @@ pub struct Config {
     pub files: FilesCfg,
     pub agent_mail: AgentMailCfg,
     pub mcp: McpCfg,
+    pub runtime: RuntimeCfg,
+    pub routes: RoutesCfg,
+    /// Other computers (or servers) Fane can send work to, by name.
+    pub remotes: BTreeMap<String, RemoteCfg>,
+    pub media: MediaCfg,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelCfg {
-    /// Ollama server. Pick one on your network in Settings or with `fane ollama use`.
+    /// Empty: Fane runs the models itself (llama.cpp; see `[runtime]`) and routes requests
+    /// (see `[routes]`). Otherwise an Ollama or other OpenAI-compatible server to use for chat.
     pub host: String,
-    /// Vision-language model served by Ollama. If it isn't installed, the first installed
-    /// model from `fallbacks` is used instead.
+    /// The everyday vision-language model. If it isn't available, the first available model
+    /// from `fallbacks` is used instead.
     pub name: String,
+    /// The model for coding tasks (Qwen Code runs on it). Empty: the everyday model.
+    pub code: String,
     pub fallbacks: Vec<String>,
     /// Optional different (e.g. faster) model just for proactive suggestions.
     pub suggest_name: String,
-    /// "auto" uses Ollama's native tool calling and falls back to a JSON protocol for
-    /// models without it (MiniCPM-V 4.7). Force with "native" or "json".
+    /// "auto" uses native tool calling and falls back to a JSON protocol for models without
+    /// it. Force with "native" or "json".
     pub tool_mode: String,
     pub temperature: f64,
+    /// Older configs (Ollama); models now stop after `[runtime] idle_minutes`.
     pub keep_alive: String,
-    /// A modest context keeps the model fully on the GPU.
+    /// Older configs (Ollama); the context length is `[runtime] context`.
     pub num_ctx: u32,
     pub json_max_tokens: u32,
     pub max_image_side: u32,
@@ -93,12 +102,11 @@ pub struct ModelCfg {
 impl Default for ModelCfg {
     fn default() -> Self {
         let mut fallbacks: Vec<String> = RECOMMENDED_MODELS.iter().map(|s| s.to_string()).collect();
-        fallbacks.extend(
-            ["gemma4", "qwen3.8", "minicpm-v4.7", "qwen3-vl", "minicpm-v", "qwen2.5vl", "llava"].map(String::from),
-        );
+        fallbacks.extend(["gemma4", "qwen3.8", "qwen3-vl", "qwen2.5vl", "llava"].map(String::from));
         Self {
-            host: "http://127.0.0.1:11434".into(),
-            name: RECOMMENDED_MODELS[0].into(),
+            host: String::new(),
+            name: DEFAULT_MODEL.into(),
+            code: CODE_MODEL.into(),
             fallbacks,
             suggest_name: String::new(),
             tool_mode: "auto".into(),
@@ -232,7 +240,9 @@ impl Default for ConnectorsCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DelegateCfg {
-    /// The coding harness offered to the model first.
+    /// The coding harness offered to the model first. "auto": Qwen Code on the coding model
+    /// when it's available, else CodeGem on the everyday model, else Claude Code or Codex
+    /// (in the order of `[routes] code`).
     pub default: String,
     /// A frontier model that plans and reviews coding work handed to a local harness:
     /// "auto" (Claude Code if installed, else Codex), "claude", "codex", or "off".
@@ -250,9 +260,11 @@ pub struct DelegateCfg {
     pub codex_cmd: Vec<String>,
 }
 
-/// A command-line coding agent Fane can hand tasks to. In `cmd` and `env`, `{task}`,
-/// `{model}` (Fane's current Ollama model, or `model` if set), `{ollama_host}` and `{cwd}`
-/// are filled in; without a `{task}` argument the task is appended last.
+/// A command-line coding agent Fane can hand tasks to. In `cmd` and `env`, `{task}`, `{model}`
+/// (Fane's everyday model, or `model` if set), `{code_model}` (the coding model, or `model`),
+/// `{base_url}` (Fane's OpenAI-compatible server, ending in /v1), `{ollama_host}` (the same
+/// without /v1, for older configs) and `{cwd}` are filled in; without a `{task}` argument the
+/// task is appended last.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AgentCfg {
@@ -260,7 +272,7 @@ pub struct AgentCfg {
     pub env: BTreeMap<String, String>,
     /// Shown to the model when it picks a harness.
     pub description: String,
-    /// Use this Ollama model instead of Fane's own.
+    /// Use this model instead of Fane's own.
     pub model: String,
 }
 
@@ -273,11 +285,30 @@ fn agent(cmd: &[&str], env: &[(&str, &str)], description: &str) -> AgentCfg {
     }
 }
 
-/// The harnesses Fane knows about, in preference order. The local ones run on the same Ollama
-/// model and server as Fane; Claude Code and Codex use their own sign-in (your subscription).
+/// The harnesses Fane knows about, in preference order. The local ones run on Fane's own
+/// models (`{base_url}` is Fane's OpenAI-compatible server); Claude Code and Codex use their own
+/// sign-in (your subscription).
 pub fn builtin_agents() -> Vec<(&'static str, AgentCfg)> {
-    let ollama = [("OLLAMA_HOST", "{ollama_host}")];
     vec![
+        (
+            "qwen",
+            agent(
+                &[
+                    "qwen",
+                    "--auth-type",
+                    "openai",
+                    "--openai-base-url",
+                    "{base_url}",
+                    "--openai-api-key",
+                    "fane",
+                    "-m",
+                    "{code_model}",
+                    "{task}",
+                ],
+                &[],
+                "Qwen Code, a coding agent running on the local coding model",
+            ),
+        ),
         (
             "codegem",
             agent(
@@ -288,53 +319,14 @@ pub fn builtin_agents() -> Vec<(&'static str, AgentCfg)> {
                     "codegem",
                     "{task}",
                     "--provider",
-                    "ollama",
+                    "llamacpp",
                     "--model",
                     "{model}",
                     "--working-dir",
                     "{cwd}",
                 ],
-                &ollama,
+                &[("LLAMACPP_HOST", "{base_url}")],
                 "CodeGem (SuperQode), a coding agent running on the local model",
-            ),
-        ),
-        (
-            "qwen",
-            agent(
-                &[
-                    "qwen",
-                    "--auth-type",
-                    "openai",
-                    "--openai-base-url",
-                    "{ollama_host}/v1",
-                    "--openai-api-key",
-                    "ollama",
-                    "-m",
-                    "{model}",
-                    "{task}",
-                ],
-                &[],
-                "Qwen Code, a coding agent running on the local model",
-            ),
-        ),
-        (
-            "deepseek",
-            agent(
-                &[
-                    "superqode",
-                    "harness",
-                    "run",
-                    "ds4-coding",
-                    "{task}",
-                    "--provider",
-                    "ollama",
-                    "--model",
-                    "{model}",
-                    "--working-dir",
-                    "{cwd}",
-                ],
-                &ollama,
-                "SuperQode's DeepSeek (ds4-coding) harness, a coding agent running on the local model",
             ),
         ),
         // Each one's own auto-approve mode: Claude Code's classifier approves safe actions and
@@ -396,7 +388,7 @@ impl DelegateCfg {
 impl Default for DelegateCfg {
     fn default() -> Self {
         Self {
-            default: "codegem".into(),
+            default: "auto".into(),
             advisor: "auto".into(),
             review_rounds: 2,
             timeout: 900,
@@ -523,6 +515,201 @@ pub struct McpServerCfg {
     pub cwd: Option<String>,
 }
 
+/// The models Fane runs on this computer, with llama.cpp (chat and coding) and
+/// stable-diffusion.cpp (images and video).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeCfg {
+    /// Where the runtimes and downloaded models live.
+    pub home: String,
+    /// Fane's model server on this computer (OpenAI-compatible; local harnesses use it too).
+    pub port: u16,
+    /// Also serve other computers on the network. They must send `token`.
+    pub share: bool,
+    pub token: String,
+    /// The GPU for each kind of work: "auto" (the most capable one), or an id from
+    /// `fane gpus` such as "cuda:0", "vulkan:0", "metal" or "cpu". Work on the same GPU takes
+    /// turns when it doesn't all fit in its memory.
+    pub chat_gpu: String,
+    pub code_gpu: String,
+    pub image_gpu: String,
+    pub video_gpu: String,
+    /// Image and video models ("" = off). See `fane models`.
+    pub image_model: String,
+    pub video_model: String,
+    /// Context length for the language models.
+    pub context: u32,
+    /// Stop a model nobody has used for this many minutes, freeing its GPU (0 = never).
+    pub idle_minutes: u64,
+    /// Use models Ollama has already downloaded instead of downloading them again.
+    pub reuse_ollama: bool,
+    /// GPU memory to plan with, in GB, by GPU id (when the driver's figure isn't right).
+    pub vram_gb: BTreeMap<String, f64>,
+    /// Extra language models, or replacements for the built-in ones, by name.
+    pub models: BTreeMap<String, LocalModelCfg>,
+    /// llama.cpp / stable-diffusion.cpp release to use ("" = the one this Fane was tested with).
+    pub llama_build: String,
+    pub sd_build: String,
+}
+
+impl Default for RuntimeCfg {
+    fn default() -> Self {
+        Self {
+            home: "~/.fane".into(),
+            port: 11500,
+            share: false,
+            token: String::new(),
+            chat_gpu: "auto".into(),
+            code_gpu: "auto".into(),
+            image_gpu: "auto".into(),
+            video_gpu: "auto".into(),
+            image_model: "z-image-turbo".into(),
+            video_model: "wan2.2-5b".into(),
+            context: 32768,
+            idle_minutes: 15,
+            reuse_ollama: true,
+            vram_gb: BTreeMap::new(),
+            models: BTreeMap::new(),
+            llama_build: String::new(),
+            sd_build: String::new(),
+        }
+    }
+}
+
+impl RuntimeCfg {
+    pub fn home_dir(&self) -> PathBuf {
+        expand(&self.home)
+    }
+
+    /// Fane's model server on this computer.
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub fn gpu_for(&self, role: Role) -> &str {
+        match role {
+            Role::Chat => &self.chat_gpu,
+            Role::Code => &self.code_gpu,
+            Role::Image => &self.image_gpu,
+            Role::Video => &self.video_gpu,
+        }
+    }
+}
+
+/// A language model for llama.cpp. `file`, `mmproj` and `draft` are paths, or
+/// "hf:<user>/<repo>/<file>" to download from Hugging Face.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LocalModelCfg {
+    pub file: String,
+    /// Vision projector (lets the model see screenshots).
+    pub mmproj: String,
+    /// Draft model for speculative decoding (MTP), which speeds up generation.
+    pub draft: String,
+    /// Extra llama-server arguments.
+    pub args: Vec<String>,
+    /// GPU memory it needs, in GB (0 = estimate from the files).
+    pub vram_gb: f64,
+}
+
+/// The kinds of work Fane routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Chat,
+    Code,
+    Image,
+    Video,
+}
+
+impl Role {
+    pub const ALL: [Role; 4] = [Role::Chat, Role::Code, Role::Image, Role::Video];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Chat => "chat",
+            Role::Code => "code",
+            Role::Image => "image",
+            Role::Video => "video",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Role> {
+        Role::ALL.into_iter().find(|r| r.as_str() == s)
+    }
+}
+
+/// Where each kind of request goes, in order of preference; the first that can take it does.
+/// "local" is this computer, a name from `[remotes]` is that computer or server, and "claude" /
+/// "codex" hand the work to Claude Code or Codex (coding; Codex also makes images).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RoutesCfg {
+    pub chat: Vec<String>,
+    pub code: Vec<String>,
+    pub image: Vec<String>,
+    pub video: Vec<String>,
+}
+
+impl Default for RoutesCfg {
+    fn default() -> Self {
+        let v = |items: &[&str]| items.iter().map(|s| s.to_string()).collect();
+        Self {
+            chat: v(&["local"]),
+            code: v(&["local", "claude", "codex"]),
+            image: v(&["local", "codex"]),
+            video: v(&["local"]),
+        }
+    }
+}
+
+impl RoutesCfg {
+    pub fn for_role(&self, role: Role) -> &[String] {
+        match role {
+            Role::Chat => &self.chat,
+            Role::Code => &self.code,
+            Role::Image => &self.image,
+            Role::Video => &self.video,
+        }
+    }
+
+    pub fn set(&mut self, role: Role, targets: Vec<String>) {
+        match role {
+            Role::Chat => self.chat = targets,
+            Role::Code => self.code = targets,
+            Role::Image => self.image = targets,
+            Role::Video => self.video = targets,
+        }
+    }
+}
+
+/// Another computer running Fane (it shares its models), or a plain server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RemoteCfg {
+    pub url: String,
+    /// The other Fane's sharing token (Settings → Models on that computer).
+    pub token: String,
+    /// "fane", "openai" (Ollama, llama-server, LM Studio, ...), "sd" (a stable-diffusion.cpp
+    /// server), or "" to detect.
+    pub kind: String,
+}
+
+/// Where generated images and videos go.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaCfg {
+    pub dir: String,
+    /// Open each new image or video in the default viewer.
+    pub open: bool,
+}
+
+impl Default for MediaCfg {
+    fn default() -> Self {
+        Self { dir: "~/Pictures/Fane".into(), open: true }
+    }
+}
+
 pub fn default_template() -> String {
     let d = Config::default();
     format!(
@@ -530,11 +717,29 @@ pub fn default_template() -> String {
 # (see src/config.rs in the Fane repository for the full list).
 
 [model]
-# Recommended: "gemma4:26b", "qwen3.8:27b", "openbmb/minicpm-v4.7:35b-a3b".
-# Compare them on this machine with `fane eval`.
+# The everyday model, and the one coding tasks use. Compare models with `fane eval`.
 name = "{name}"
+code = "{code}"
 # suggest_name = ""   # optional separate model for suggestions
-host = "{host}"
+# host = ""           # empty: Fane runs the models itself; or an Ollama/OpenAI-compatible server
+
+[runtime]
+# Which GPU does what: "auto" or an id from `fane gpus` (e.g. "cuda:0", "vulkan:0").
+chat_gpu = "auto"
+code_gpu = "auto"
+image_gpu = "auto"
+video_gpu = "auto"
+# share = false       # let other computers running Fane use this one's models
+
+[routes]
+# Where each kind of request goes, first choice first: "local", a name from [remotes],
+# "claude" or "codex".
+code = ["local", "claude", "codex"]
+image = ["local", "codex"]
+
+# [remotes.nuc]
+# url = "http://nuc.local:11500"
+# token = "..."
 
 [suggestions]
 enabled = true
@@ -557,9 +762,9 @@ notes_dirs = ["~/Notes", "~/Documents/Notes"]
 roots = ["~"]
 
 [delegate]
-# Coding agent for hard tasks: codegem (pairs with gemma4), qwen (Qwen Code, pairs with
-# qwen3.8), deepseek (SuperQode's DeepSeek harness, pairs with MiniCPM), claude or codex.
-default = "codegem"
+# Coding agent for hard tasks: "auto", qwen (Qwen Code on the coding model), codegem
+# (CodeGem on the everyday model), claude or codex.
+default = "auto"
 # When Claude Code (or Codex) is installed, it plans coding tasks for the local harness and
 # reviews its changes; the harness then fixes what the review finds. "off" to disable.
 advisor = "auto"
@@ -574,13 +779,19 @@ advisor = "auto"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/Documents"]
 "#,
         name = d.model.name,
-        host = d.model.host,
+        code = d.model.code,
         corner = d.suggestions.corner,
         binding = d.hotkey.binding,
     )
 }
 
 impl Config {
+    /// The server Fane's own chat goes to: `[model] host`, or Fane's model server.
+    pub fn llm_host(&self) -> String {
+        let h = self.model.host.trim().trim_end_matches('/');
+        if h.is_empty() { self.runtime.url() } else { h.to_string() }
+    }
+
     pub fn load() -> Result<Self> {
         Self::load_from(&CONFIG_PATH)
     }
@@ -629,6 +840,43 @@ pub fn set_value_in(path: &Path, section: &str, key: &str, value: impl Into<toml
     Ok(())
 }
 
+/// Add, replace (`Some`) or remove (`None`) `[remotes.<name>]`.
+pub fn set_remote(name: &str, remote: Option<&RemoteCfg>) -> Result<()> {
+    set_remote_in(&CONFIG_PATH, name, remote)
+}
+
+pub fn set_remote_in(path: &Path, name: &str, remote: Option<&RemoteCfg>) -> Result<()> {
+    if !path.exists() {
+        Config::load_from(path)?;
+    }
+    let text = std::fs::read_to_string(path)?;
+    let mut doc: toml_edit::DocumentMut = text.parse().with_context(|| format!("parsing {}", path.display()))?;
+    if !doc.contains_table("remotes") {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        doc["remotes"] = toml_edit::Item::Table(t);
+    }
+    let remotes = doc["remotes"].as_table_mut().context("[remotes] is not a table")?;
+    match remote {
+        Some(r) => {
+            let mut t = toml_edit::Table::new();
+            t["url"] = toml_edit::value(r.url.as_str());
+            t["token"] = toml_edit::value(r.token.as_str());
+            if !r.kind.is_empty() {
+                t["kind"] = toml_edit::value(r.kind.as_str());
+            }
+            remotes.insert(name, toml_edit::Item::Table(t));
+        }
+        None => {
+            remotes.remove(name);
+        }
+    }
+    let out = doc.to_string();
+    toml::from_str::<Config>(&out).context("refusing to write a config that can't be read back")?;
+    std::fs::write(path, out)?;
+    Ok(())
+}
+
 /// A string list as a TOML array value.
 pub fn str_array(items: &[String]) -> toml_edit::Value {
     let mut a = toml_edit::Array::new();
@@ -645,7 +893,11 @@ mod tests {
     #[test]
     fn template_parses_to_defaults() {
         let cfg: Config = toml::from_str(&default_template()).unwrap();
-        assert_eq!(cfg.model.name, RECOMMENDED_MODELS[0]);
+        assert_eq!(cfg.model.name, DEFAULT_MODEL);
+        assert_eq!(cfg.model.code, CODE_MODEL);
+        assert!(cfg.model.host.is_empty());
+        assert_eq!(cfg.routes, RoutesCfg::default());
+        assert_eq!(cfg.runtime.port, 11500);
         assert_eq!(cfg.suggestions.interval_seconds, 25);
         assert!(cfg.mcp.servers.is_empty());
         assert_eq!(cfg.agent_mail.max_auto_replies_per_hour, 20);
@@ -683,6 +935,26 @@ mod tests {
     }
 
     #[test]
+    fn remotes_and_routes_round_trip() {
+        let dir = std::env::temp_dir().join(format!("fane-cfg-remote-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("c.toml");
+        std::fs::write(&p, "[model]\nname = \"gemma4:26b\"\n").unwrap();
+        let nuc = RemoteCfg { url: "http://nuc.local:11500".into(), token: "t0k".into(), kind: "fane".into() };
+        set_remote_in(&p, "nuc", Some(&nuc)).unwrap();
+        set_value_in(&p, "routes", "code", str_array(&["nuc".into(), "claude".into()])).unwrap();
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(cfg.remotes["nuc"], nuc);
+        assert_eq!(cfg.routes.code, ["nuc", "claude"]);
+        assert_eq!(cfg.routes.image, ["local", "codex"], "untouched routes keep their defaults");
+        assert_eq!(cfg.llm_host(), "http://127.0.0.1:11500");
+        set_remote_in(&p, "nuc", None).unwrap();
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(cfg.remotes.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn delegate_agents_merge_and_order() {
         let cfg: Config = toml::from_str(
             "[delegate]\ndefault = \"qwen\"\nclaude_cmd = [\"claude\", \"--x\"]\n\
@@ -692,11 +964,11 @@ mod tests {
         .unwrap();
         let agents = cfg.delegate.all_agents();
         let names: Vec<&str> = agents.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["qwen", "codegem", "deepseek", "claude", "codex", "aider"]);
+        assert_eq!(names, ["qwen", "codegem", "claude", "codex", "aider"]);
         assert_eq!(agents[0].1.model, "qwen3.8:27b");
         assert!(agents[0].1.cmd.contains(&"{task}".to_string()));
-        assert_eq!(agents[3].1.cmd, ["claude", "--x"]);
-        assert_eq!(Config::default().delegate.all_agents()[0].0, "codegem");
+        assert_eq!(agents[2].1.cmd, ["claude", "--x"]);
+        assert_eq!(Config::default().delegate.all_agents()[0].0, "qwen");
     }
 
     #[test]

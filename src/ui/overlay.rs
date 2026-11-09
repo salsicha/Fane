@@ -33,7 +33,10 @@ pub enum Card {
         tx: Option<oneshot::Sender<bool>>,
     },
     /// First-run setup offer.
-    Offer(String),
+    Offer {
+        title: String,
+        text: String,
+    },
 }
 
 pub enum OverlayAction {
@@ -145,8 +148,8 @@ impl Overlay {
         }
     }
 
-    pub fn show_offer(&mut self, text: &str) {
-        if let Some((c, s)) = self.defer(Card::Offer(text.into()), 120) {
+    pub fn show_offer(&mut self, title: &str, text: &str) {
+        if let Some((c, s)) = self.defer(Card::Offer { title: title.into(), text: text.into() }, 120) {
             self.present(c, s);
         }
     }
@@ -255,9 +258,9 @@ impl Overlay {
                 (String::new(), t, text.clone(), !*error, 240.0)
             }
             Some(Card::Toast(text)) => (String::new(), text.clone(), String::new(), false, 0.0),
-            Some(Card::Offer(text)) => {
+            Some(Card::Offer { title, text }) => {
                 buttons = vec![("Not now".into(), false, 8), ("Set up".into(), true, 9)];
-                ("· setup".into(), "Set up Fane?".into(), format!("{text}. Fane needs these to work."), false, 80.0)
+                ("· setup".into(), title.clone(), text.clone(), false, 80.0)
             }
             Some(Card::Confirm { details, .. }) if details.get("title").is_some() => {
                 // Generic confirmation (file changes, ...): title, meta, text, ok label.
@@ -324,7 +327,7 @@ impl Overlay {
         self.hovered =
             resp.response.rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or(egui::pos2(-1.0, -1.0)));
 
-        if close && matches!(self.card, Some(Card::Offer(_))) {
+        if close && matches!(self.card, Some(Card::Offer { .. })) {
             self.fade_out();
             actions.push(OverlayAction::SetupDeclined);
             close = false;

@@ -1,5 +1,5 @@
 //! The coding-harness part of `fane eval`: give a model's paired harness (CodeGem, Qwen Code,
-//! SuperQode's DeepSeek harness, ...) a small project with a failing test, then check the test ourselves.
+//! ...) a small project with a failing test, then check the test ourselves.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -75,7 +75,7 @@ pub fn paired_harness(model: &str, cfg: &Config) -> String {
         .iter()
         .find(|(m, _)| find_installed(m.split(':').next().unwrap_or(m), &[model.to_string()]).is_some())
         .map(|(_, h)| h.to_string())
-        .unwrap_or_else(|| cfg.delegate.default.clone())
+        .unwrap_or_else(|| if cfg.delegate.default == "auto" { "codegem".into() } else { cfg.delegate.default.clone() })
 }
 
 /// Harness commands for the eval: same as configured, but allowed to edit files without asking
@@ -119,7 +119,7 @@ pub async fn score(dir: &Path, output: &str, record: &mut HarnessRecord) {
     record.explained = low.contains("session") && low.contains("uid");
 }
 
-/// Run `harness` on `model` (an installed Ollama tag) against a fresh copy of the project.
+/// Run `harness` on `model` (one the model server has) against a fresh copy of the project.
 pub async fn run_task(
     cfg: &Config,
     harness: &str,
@@ -143,7 +143,7 @@ pub async fn run_task(
         record.error = Some(format!("cannot create the test project: {e}"));
         return record;
     }
-    let vars = Vars { model: model.into(), ollama_host: host.into() };
+    let vars = Vars { model: model.into(), code_model: model.into(), host: host.into() };
     let t0 = Instant::now();
     let cwd = dir.display().to_string();
     let output = match crate::connectors::review::advisor(&delegate.cfg).filter(|_| with_advisor) {
@@ -178,7 +178,6 @@ mod tests {
         assert_eq!(paired_harness("gemma4:26b", &cfg), "codegem");
         assert_eq!(paired_harness("qwen3.8:27b", &cfg), "qwen");
         assert_eq!(paired_harness("qwen3.8:latest", &cfg), "qwen");
-        assert_eq!(paired_harness("openbmb/minicpm-v4.7:35b-a3b", &cfg), "deepseek");
         assert_eq!(paired_harness("llava:13b", &cfg), "codegem");
     }
 

@@ -1,9 +1,9 @@
 //! Tool-using agent loop on top of the local model.
 //!
 //! Two calling conventions:
-//! - native: Ollama's `tools` API (Gemma 4, Qwen 3.8, ...)
-//! - json:   for models without native tool calling (e.g. MiniCPM-V 4.7), the model answers
-//!   with {"action": ..., "arguments": ...} under a JSON schema.
+//! - native: the OpenAI-style `tools` API (Gemma 4, Qwen 3.8, ...)
+//! - json:   for models without native tool calling, the model answers with
+//!   {"action": ..., "arguments": ...} under a JSON schema.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::config::ModelCfg;
-use crate::llm::{LlmError, LlmResult, Ollama, encode_image, parse_json};
+use crate::llm::{Llm, LlmError, LlmResult, encode_image, parse_json};
 use crate::snapshot::Snapshot;
 use crate::tools::{Args, ToolRegistry};
 
@@ -126,7 +126,7 @@ const CORE_TOOLS: [&str; 16] = [
 ];
 
 pub struct Agent {
-    pub llm: Arc<Ollama>,
+    pub llm: Arc<Llm>,
     pub tools: ToolRegistry,
     pub cfg: ModelCfg,
     pub modes: ToolModes,
@@ -136,7 +136,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(llm: Arc<Ollama>, tools: ToolRegistry, cfg: ModelCfg, modes: ToolModes) -> Self {
+    pub fn new(llm: Arc<Llm>, tools: ToolRegistry, cfg: ModelCfg, modes: ToolModes) -> Self {
         Self { llm, tools, cfg, modes, preferences: String::new(), selector: None }
     }
 

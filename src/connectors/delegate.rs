@@ -1,7 +1,8 @@
-//! Hand hard tasks to a command-line coding agent (CodeGem, Qwen Code, SuperQode's DeepSeek harness,
-//! Claude Code, Codex, or one you configure) running non-interactively.
+//! Hand hard tasks to a command-line coding agent (Qwen Code, CodeGem, Claude Code, Codex, or
+//! one you configure) running non-interactively.
 
 use std::process::Stdio;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -9,40 +10,63 @@ use tokio::process::Command;
 
 use crate::config::{AgentCfg, DelegateCfg, expand};
 
-/// Fane's current Ollama model and server, for the `{model}` / `{ollama_host}` placeholders.
+/// Fane's models and model server, for the `{model}`, `{code_model}`, `{base_url}` and
+/// `{ollama_host}` placeholders.
 #[derive(Debug, Clone, Default)]
 pub struct Vars {
     pub model: String,
-    pub ollama_host: String,
+    pub code_model: String,
+    /// The model server's address without `/v1`.
+    pub host: String,
 }
 
 pub struct Delegate {
     pub cfg: DelegateCfg,
     pub(crate) agents: Vec<(String, AgentCfg)>,
+    /// Preference order when `default` is "auto" (set from `[routes] code`).
+    order: RwLock<Vec<String>>,
 }
 
-/// Fill in `{task}`, `{model}`, `{ollama_host}` and `{cwd}`.
-fn fill(template: &str, task: &str, model: &str, host: &str, cwd: &str) -> String {
-    template.replace("{model}", model).replace("{ollama_host}", host).replace("{cwd}", cwd).replace("{task}", task)
+/// Fill in the placeholders.
+fn fill(template: &str, task: &str, model: &str, code_model: &str, host: &str, cwd: &str) -> String {
+    template
+        .replace("{model}", model)
+        .replace("{code_model}", code_model)
+        .replace("{base_url}", &format!("{host}/v1"))
+        .replace("{ollama_host}", host)
+        .replace("{cwd}", cwd)
+        .replace("{task}", task)
 }
 
 impl Delegate {
     pub fn new(cfg: DelegateCfg) -> Self {
         let agents = cfg.all_agents();
-        Self { cfg, agents }
+        Self { cfg, agents, order: RwLock::new(vec![]) }
+    }
+
+    /// Which harnesses to prefer, best first (used when `default` is "auto").
+    pub fn set_order(&self, order: Vec<String>) {
+        *self.order.write().unwrap() = order;
     }
 
     pub(crate) fn agent(&self, name: &str) -> Option<&AgentCfg> {
         self.agents.iter().find(|(n, _)| n == name).map(|(_, a)| a)
     }
 
-    /// (name, description) of the harnesses whose command is installed, default first.
+    /// (name, description) of the harnesses whose command is installed, preferred first.
     pub fn available(&self) -> Vec<(String, String)> {
-        self.agents
+        let mut list: Vec<(String, String)> = self
+            .agents
             .iter()
             .filter(|(_, a)| a.cmd.first().is_some_and(|c| which::which(c).is_ok()))
             .map(|(n, a)| (n.clone(), a.description.clone()))
-            .collect()
+            .collect();
+        if self.cfg.default == "auto" {
+            let order = self.order.read().unwrap();
+            let rank = |n: &str| order.iter().position(|o| o == n).unwrap_or(order.len());
+            list.sort_by_key(|(n, _)| rank(n)); // stable: built-in order breaks ties
+        }
+        list
     }
 
     /// Runs the harness on `task`; returns its (trimmed) output or "error: ...".
@@ -88,8 +112,15 @@ pub async fn exec_status(
         return (format!("error: {program} is not installed"), false);
     };
     let model = if spec.model.is_empty() { vars.model.as_str() } else { spec.model.as_str() };
+    let code_model = if !spec.model.is_empty() {
+        spec.model.as_str()
+    } else if vars.code_model.is_empty() {
+        vars.model.as_str()
+    } else {
+        vars.code_model.as_str()
+    };
     let dir = workdir.display().to_string();
-    let fill = |t: &str| fill(t, task, model, &vars.ollama_host, &dir);
+    let fill = |t: &str| fill(t, task, model, code_model, &vars.host, &dir);
     let mut argv: Vec<String> = args.iter().map(|a| fill(a)).collect();
     if !spec.cmd.iter().any(|a| a.contains("{task}")) {
         argv.push(task.to_string());
@@ -167,7 +198,7 @@ mod tests {
     /// Only a `claude` harness (with this command) and a missing `codex` one.
     fn cfg(claude: &[&str], timeout: u64) -> DelegateCfg {
         let mut agents = std::collections::BTreeMap::new();
-        for name in ["codegem", "qwen", "deepseek"] {
+        for name in ["codegem", "qwen"] {
             agents.insert(name.into(), AgentCfg { cmd: vec!["fane-no-such-command-xyz".into()], ..Default::default() });
         }
         DelegateCfg {
@@ -181,13 +212,25 @@ mod tests {
     }
 
     fn vars() -> Vars {
-        Vars { model: "gemma4:26b".into(), ollama_host: "http://127.0.0.1:11434".into() }
+        Vars { model: "gemma4:26b".into(), code_model: "qwen3.8:27b".into(), host: "http://127.0.0.1:11500".into() }
     }
 
     #[test]
     fn available_skips_missing() {
         let d = Delegate::new(cfg(&["fane-no-such-command-abc"], 5));
         assert!(d.available().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_order_follows_routes() {
+        let mut c = cfg(&["sh"], 5);
+        c.codex_cmd = vec!["sh".into()];
+        let d = Delegate::new(c);
+        let names = |d: &Delegate| d.available().into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(names(&d), ["claude", "codex"]);
+        d.set_order(vec!["codex".into(), "claude".into()]);
+        assert_eq!(names(&d), ["codex", "claude"]);
     }
 
     #[test]
@@ -240,17 +283,21 @@ mod tests {
                 cmd: vec![
                     "sh".into(),
                     "-c".into(),
-                    "echo \"$1|$2|$OLLAMA_HOST\"".into(),
+                    "echo \"$1|$2|$3|$LLAMACPP_HOST\"".into(),
                     "x".into(),
                     "{model}".into(),
+                    "{code_model}".into(),
                     "{task}".into(),
                 ],
-                env: [("OLLAMA_HOST".to_string(), "{ollama_host}".to_string())].into(),
+                env: [("LLAMACPP_HOST".to_string(), "{base_url}".to_string())].into(),
                 ..Default::default()
             },
         );
         let d = Delegate::new(cfg);
         assert_eq!(d.available()[0].0, "codegem");
-        assert_eq!(d.run("codegem", "fix it", "", &vars()).await, "gemma4:26b|fix it|http://127.0.0.1:11434");
+        assert_eq!(
+            d.run("codegem", "fix it", "", &vars()).await,
+            "gemma4:26b|qwen3.8:27b|fix it|http://127.0.0.1:11500/v1"
+        );
     }
 }

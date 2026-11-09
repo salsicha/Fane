@@ -1,0 +1,91 @@
+name: stable-diffusion.cpp for Linux
+
+# stable-diffusion.cpp's own Linux builds need glibc 2.43 (Ubuntu 26.04), and it has no Linux
+# CUDA build. This builds both variants on Ubuntu 22.04 (glibc 2.35) at the release Fane pins
+# (`SD_TAG` in src/runtime/install.rs). Run by hand; with `publish`, the archives are attached to
+# the `sd-<short tag>` release that `fane setup` downloads from.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: stable-diffusion.cpp release tag
+        default: master-1079-a3c49b1
+      publish:
+        description: Attach to the sd-<short tag> release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [vulkan, cuda12]
+    steps:
+      - name: Short tag
+        id: tag
+        run: |
+          t="${{ inputs.tag }}"
+          echo "short=$(echo "$t" | cut -d- -f1)-$(echo "$t" | cut -d- -f3)" >> "$GITHUB_OUTPUT"
+      - name: Vulkan SDK
+        if: matrix.variant == 'vulkan'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update && sudo apt-get install -y vulkan-sdk
+      - name: CUDA 12.8
+        if: matrix.variant == 'cuda12'
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update && sudo apt-get install -y cuda-toolkit-12-8
+          echo /usr/local/cuda-12.8/bin >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          git clone --depth 1 --branch "${{ inputs.tag }}" --recurse-submodules --shallow-submodules \
+            https://github.com/leejet/stable-diffusion.cpp src
+          if [ "${{ matrix.variant }}" = cuda12 ]; then
+            # Volta (V100) through Hopper, plus PTX for newer cards.
+            flags="-DSD_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=70-real;75-real;80-real;86-real;89-real;90"
+          else
+            flags="-DSD_VULKAN=ON"
+          fi
+          cmake -S src -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DSD_BUILD_SHARED_LIBS=OFF $flags
+          cmake --build build --config Release -j "$(nproc)" --target sd-server sd-cli
+      - name: Package
+        id: pkg
+        run: |
+          name="sd-${{ steps.tag.outputs.short }}-linux-${{ matrix.variant }}-x64"
+          mkdir "$name"
+          cp build/bin/sd-server build/bin/sd-cli "$name/"
+          find build -name '*.so*' -exec cp -P {} "$name/" \;
+          if [ "${{ matrix.variant }}" = cuda12 ]; then
+            # The CUDA runtime libraries, so the user needs only the NVIDIA driver.
+            for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
+              cp -L "/usr/local/cuda-12.8/lib64/$lib" "$name/"
+            done
+          fi
+          cp src/LICENSE "$name/LICENSE.stable-diffusion.cpp"
+          tar czf "$name.tar.gz" "$name"
+          echo "file=$name.tar.gz" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.file }}
+          path: ${{ steps.pkg.outputs.file }}
+      - name: Publish
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rel="sd-${{ steps.tag.outputs.short }}"
+          gh release view "$rel" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$rel" -R "$GITHUB_REPOSITORY" --title "stable-diffusion.cpp ${{ inputs.tag }} for Linux" \
+              --notes "Built from leejet/stable-diffusion.cpp ${{ inputs.tag }} for Fane (glibc 2.35+). MIT licensed." --prerelease
+          gh release upload "$rel" "${{ steps.pkg.outputs.file }}" -R "$GITHUB_REPOSITORY" --clobber

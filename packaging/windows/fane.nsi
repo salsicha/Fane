@@ -39,10 +39,34 @@ Section "Fane" SecFane
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
 SectionEnd
 
-; Runs after the files are in place: Fane starts and, if Ollama or the model is missing,
-; installs Ollama (official per-user installer) and downloads Gemma 4 26B with a progress card.
-Section "Install Ollama and download Gemma 4 (about 18 GB)" SecSetup
-  Exec '"$INSTDIR\fane.exe" run --setup'
+; Run after the files are in place: Fane starts and gets llama.cpp and Gemma 4 26B (using
+; Ollama's copy if it has one), with a progress card. The optional extras come first so they
+; are part of the same setup.
+Section /o "Coding model: Qwen 3.8 27B (about 19 GB)" SecCode
+  WriteINIStr "$INSTDIR\setup.ini" "want" "code" "1"
+SectionEnd
+
+Section /o "Image generation: Z-Image Turbo (about 11 GB)" SecImages
+  WriteINIStr "$INSTDIR\setup.ini" "want" "images" "1"
+SectionEnd
+
+Section /o "Video generation: Wan 2.2 (about 13 GB)" SecVideo
+  WriteINIStr "$INSTDIR\setup.ini" "want" "video" "1"
+SectionEnd
+
+Section "Get llama.cpp and Gemma 4 (about 16 GB)" SecSetup
+  ReadINIStr $0 "$INSTDIR\setup.ini" "want" "code"
+  ReadINIStr $1 "$INSTDIR\setup.ini" "want" "images"
+  ReadINIStr $2 "$INSTDIR\setup.ini" "want" "video"
+  StrCpy $3 ""
+  StrCmp $0 "1" 0 +2
+    StrCpy $3 "$3 --code"
+  StrCmp $1 "1" 0 +2
+    StrCpy $3 "$3 --images"
+  StrCmp $2 "1" 0 +2
+    StrCpy $3 "$3 --video"
+  Delete "$INSTDIR\setup.ini"
+  Exec '"$INSTDIR\fane.exe" run --setup$3'
 SectionEnd
 
 Section "Uninstall"
@@ -54,5 +78,7 @@ Section "Uninstall"
   RMDir "$INSTDIR"
   ; Autostart entry written by `fane autostart on`.
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Fane"
+  ; Background model server entry written by `fane service on`.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "FaneServe"
   DeleteRegKey HKCU "${UNINST_KEY}"
 SectionEnd

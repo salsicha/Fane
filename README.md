@@ -8,10 +8,16 @@ When it has a specific, useful idea, a small card slides into the corner of the 
 with a ready-to-run prompt. Click **Run** to do it, **Edit** to tweak the prompt first,
 or ignore it and it fades away. Press a hotkey any time to type your own request.
 
-- **Local model.** Uses a vision model served by [Ollama](https://ollama.com) (see
-  [Recommended models](#recommended-models)), on this computer or
-  [another one on your network](#using-ollama-on-another-computer). No screen content
-  leaves your network unless you delegate a task.
+- **Local models.** Runs its own models with [llama.cpp](https://github.com/ggml-org/llama.cpp)
+  (Gemma 4 26B every day, Qwen 3.8 27B for coding; see [Recommended models](#recommended-models)),
+  reusing anything [Ollama](https://ollama.com) already downloaded. No screen content leaves
+  your network unless you delegate a task.
+- **Makes images and videos** with [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+  (Z-Image Turbo and Wan 2.2). See [Images and video](#images-and-video).
+- **Shares the big GPU.** Choose which GPU does what (chat on the integrated GPU, coding and
+  images on the discrete one), and let your other computers use this one's GPU: Fane on a
+  laptop can send coding or image requests to Fane on the desktop with the GPU, which runs
+  whichever model the request needs. See [Models, GPUs and other computers](#models-gpus-and-other-computers).
 - **Inserts at your cursor.** Drafts, replies and rewrites are pasted where you're already
   typing. Images work too.
 - **Works with your files.** It can find, search and read files in the folders you allow,
@@ -25,25 +31,34 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
 - **Has its own email** (Linux). Give it a Gmail account through GNOME Online Accounts. You
   can email it tasks from your own address, and it replies. Mail from anyone else is ignored.
 - **Delegates the hard stuff.** Coding and long multi-step tasks go to a command-line coding
-  agent: CodeGem or Qwen Code on the same local model, or Claude Code and Codex on your own
-  subscription.
+  agent: Qwen Code or CodeGem on the local models, or Claude Code and Codex on your own
+  subscription (Claude also plans and reviews the local agents' work).
 - **Stays out of the way.** It only re-reads the screen when something changed, suggests at
   most one thing at a time, and backs off further each time you dismiss a suggestion. It
   never looks at password managers or private browser windows.
 
 ## Install
 
-Fane runs on [Ollama](https://ollama.com) and the [Gemma 4 26B](#recommended-models) model.
-If they're missing, Fane sets them up for you: the Windows installer does it right away (an
-option that's on by default), and on Linux and macOS the first launch shows a **Set up Fane?**
-card. You can also run `fane setup` in a terminal, or use **Settings… → Install Ollama and
-Gemma 4…**. Setup installs Ollama with its official installer for your OS (on Linux that
-asks for your password), starts it, and downloads `gemma4:26b` (about 18 GB) with a progress
-bar. It does nothing if they're already there, and it never installs anything on a remote
-Ollama server you picked in Settings.
+Fane runs its models with llama.cpp. If something's missing, Fane sets it up for you: the
+Windows installer does it right away (an option that's on by default, with optional extras
+for coding, images and video), and on Linux and macOS the first launch shows a **Set up
+Fane?** card. You can also run `fane setup` in a terminal, or use **Settings… → Models →
+Download**. Setup:
 
-Optionally install the default [coding agent](#coding-agents), CodeGem:
-`uv tool install superqode`.
+- downloads the llama.cpp build for your GPU (NVIDIA CUDA, Vulkan for other GPUs, or Metal on
+  a Mac) from llama.cpp's GitHub releases into `~/.fane/runtimes`;
+- uses the copy of a model that Ollama has already downloaded, if it has one (no second
+  copy), and otherwise downloads it from Hugging Face into `~/.fane/models` (Gemma 4 26B is
+  about 16 GB), resuming if it's interrupted;
+- with `fane setup --code`, `--images`, `--video` or `--all`, also gets Qwen 3.8 27B,
+  stable-diffusion.cpp and the image and video models.
+
+It does nothing for what's already there, and it doesn't change Ollama. If Fane was using
+Ollama before (`[model] host` set to it), it keeps doing so until you accept the **Run models
+with llama.cpp?** card or run `fane setup`; your models stay where Ollama put them.
+
+Optionally install the [coding agents](#coding-agents): `npm install -g @qwen-code/qwen-code`
+(Qwen Code) and `uv tool install superqode` (CodeGem).
 
 ### Ubuntu 24.04+ (apt)
 
@@ -60,7 +75,7 @@ and break offline installs), so the first launch offers it instead. Then set it 
 desktop:
 
 ```bash
-fane setup                    # install Ollama and download Gemma 4 26B if missing
+fane setup                    # llama.cpp and Gemma 4 26B (add --code --images --video)
 fane install-extension        # GNOME helper (log out and back in once on Wayland)
 fane setup-shortcut           # Ctrl+Super+Space opens the prompt box
 fane autostart on             # optional: start at login
@@ -81,8 +96,8 @@ Settings → Privacy & Security. The hotkey is <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<
 
 Download `Fane-<version>-windows-x64-setup.exe` (per-user install, no admin rights) or the
 portable `.zip` from the [releases](https://github.com/salsicha/Fane/releases). The installer's
-**Install Ollama and download Gemma 4** option (on by default) starts Fane when it's done and
-sets both up. Fane lives
+**Get llama.cpp and Gemma 4** option (on by default) starts Fane when it's done and sets them
+up, along with any of the optional coding, image and video models you tick. Fane lives
 in the notification area. The hotkey is <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd>.
 
 On macOS and Windows, `fane autostart on` (from a terminal, using the full path to the
@@ -120,7 +135,12 @@ in ~/code/api"* (which gets delegated to a [coding agent](#coding-agents)).
 
 **Settings…** in the tray menu covers the things you'd change most:
 
-- **Ollama server**: pick the server Fane uses (see below).
+- **Models**: what runs where. For each kind of work (everyday, coding, images, video) pick
+  this computer and which GPU, another computer, or Claude Code / Codex; download what's
+  missing; share this computer's models with your other computers; and run them as a
+  background service. See [Models, GPUs and other computers](#models-gpus-and-other-computers).
+- **Other computers**: other Fanes, stable-diffusion.cpp servers and Ollama servers on your
+  network, found automatically.
 - **Files**: the folders Fane may use (see [Files](#files)).
 - **Your email**: your personal address. Only mail from it is read, acted on and answered.
 - **Fane's own Gmail account** (Linux): which Online Accounts mailbox Fane uses, or off.
@@ -192,28 +212,101 @@ longer accurate:
 Both live in a local SQLite database in Fane's state folder (`~/.local/state/fane/fane.db` on
 Linux) and never leave your machine.
 
-## Using Ollama on another computer
+## Models, GPUs and other computers
 
-If a different machine on your network has the bigger GPU, Fane can use the Ollama
-running there. Open **Settings…** from the tray menu. Fane scans this computer and your
-local network (port 11434 on every address of your subnet, which takes about a second) and
-lists each Ollama server it finds with its version, how many models it has, and which one
-Fane would use. Pick one and click **Use this server**, or type an address such as
-`192.168.1.20` or `http://gpu-box.lan:11434` if the server is on another network or port.
+Fane runs a small model server inside itself (on `127.0.0.1:11500`, speaking the OpenAI API)
+that starts each model when it's first needed, stops it after 15 idle minutes, and routes every
+request by a few lines of config. The coding agents use the same server, so they run on the
+same models.
 
-Fane only switches if the server answers and has one of Fane's models installed. The
-choice is saved as `[model] host` and takes effect immediately, with no restart. From a
-terminal:
+**Which GPU does what.** `fane gpus` lists the GPUs (for example `cuda:0` for an NVIDIA card,
+`vulkan:0` for an Intel or AMD one), and each kind of work can use a different one:
 
-```bash
-fane ollama scan               # list the servers Fane can find
-fane ollama use 192.168.1.20   # switch to one
+```toml
+[runtime]
+chat_gpu = "vulkan:0"   # Gemma 4 on the integrated GPU (shared memory)
+code_gpu = "cuda:0"     # Qwen 3.8 on the NVIDIA card...
+image_gpu = "cuda:0"    # ...taking turns with image generation
+video_gpu = "cuda:0"
 ```
 
-Ollama only listens on localhost by default. To share it, set `OLLAMA_HOST=0.0.0.0:11434`
-on the server (on Linux: `sudo systemctl edit ollama`, then add
-`Environment="OLLAMA_HOST=0.0.0.0:11434"` under `[Service]`) and allow port 11434 through
-its firewall.
+(or **Settings → Models**, or `fane gpus chat vulkan:0`). `"auto"`, the default, is the most
+capable GPU. Models on the same GPU share it: if they fit in its memory together they stay
+loaded together, and if not, the one that's needed now replaces the least recently used idle
+one. A model is never stopped while it's answering; the new request waits for it.
+
+**Where each request goes.** `[routes]` lists, for each kind of work, where to send it, first
+choice first; the first one that can take it does:
+
+```toml
+[routes]
+chat  = ["local"]
+code  = ["local", "claude", "codex"]   # the local coding model, else Claude Code, else Codex
+image = ["local", "codex"]             # Codex makes images too
+video = ["local"]
+```
+
+`"local"` is this computer, `"claude"` and `"codex"` are the command-line agents on your
+subscription, and any other name is a computer or server under `[remotes]`. Change them in
+**Settings → Models** or with `fane route code nuc claude`. `fane models` shows the models
+this computer can run and the routes.
+
+**Using another computer's GPU.** On the computer with the GPU (say a NUC with a V100), turn on
+**Settings → Models → Let other computers on my network use this computer's models** (or
+`fane share on`). Fane then listens on the network and shows a token. On the other computer
+(say a Mac), **Settings → Other computers** lists the NUC; select it, paste the token and
+click **Add** (or `fane remote add nuc.local --token <token>`). Then send work to it:
+
+```toml
+[remotes.nuc]
+url = "http://nuc.local:11500"
+token = "…"
+
+[routes]
+chat  = ["local"]                 # the Mac's own Gemma 4
+code  = ["nuc", "local", "claude"]
+image = ["nuc"]
+video = ["nuc"]
+```
+
+A coding request from the Mac then runs Qwen 3.8 on the V100; an image request swaps it out
+for Z-Image Turbo, and the next coding request swaps it back. To keep the NUC's models
+available without Fane's window open, tick **Keep the models available when Fane isn't open**
+(or `fane service on`): a systemd user service on Linux (it keeps running while you're signed
+out if your system allows lingering), a launchd agent on macOS, or a sign-in entry on
+Windows. It runs `fane serve`, which is just the model server.
+
+**Other servers.** The same list finds stable-diffusion.cpp servers (add one and route
+`image` / `video` to it; Fane loads the image or video model there if the server has its
+files) and Ollama servers (choosing one makes it the server for everyday chat, `[model]
+host`, as before). Ollama only listens on localhost by default; to share it, set
+`OLLAMA_HOST=0.0.0.0:11434` on that machine.
+
+```bash
+fane servers scan                       # other Fanes, Ollama and stable-diffusion.cpp servers
+fane remote add 192.168.1.20 --token …  # another Fane
+fane servers use 192.168.1.30:11434     # an Ollama server for chat
+```
+
+## Images and video
+
+With images set up (`fane setup --images`, or the installer option), the assistant gets a
+`generate_image` tool: ask *"make an image of a reading nook with a cat, warm light"* and it
+saves a PNG to `~/Pictures/Fane` (`[media] dir`) and opens it. `generate_video` makes short
+clips (`fane setup --video`; a 2-second 832×480 clip, optionally starting from an image).
+Both run on the GPU in `image_gpu` / `video_gpu`, or wherever `[routes]` sends them; with no
+image model anywhere and Codex installed, Codex makes the image instead.
+
+| | Model | Download | GPU memory |
+| --- | --- | --- | --- |
+| Images | [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) (Q8, 9 steps) | ~11 GB | ~11 GB at 1024×1024 |
+| Video | [Wan 2.2 TI2V 5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) (Q8) | ~13 GB | more; the VAE is the hungry part |
+
+stable-diffusion.cpp's own Linux builds need a newer C library than Ubuntu 24.04 has, so on
+Linux Fane uses its own builds (a GitHub Actions workflow builds them for CUDA and Vulkan), or
+compiles it on your computer if `cmake`, a C++ compiler and `glslc` / `libvulkan-dev` (or the
+CUDA toolkit) are installed. On a Tesla V100 through Vulkan, a 1024×1024 image takes about a
+minute.
 
 ## Fane's own email
 
@@ -247,75 +340,55 @@ password, so Fane's own mailbox isn't available there yet. Everything else is.
 
 ## Recommended models
 
-Fane is tuned for three pairings of a local vision model with a command-line coding agent
-("harness") that the model hands bigger coding tasks to:
+Fane uses two local models, each paired with a command-line coding agent ("harness") that
+coding tasks are handed to:
 
-| | Model | Ollama tag | Size (Q4) | Tool calling | Coding harness |
+| | Model | Name | Size (Q4) | Used for | Coding harness |
 | --- | --- | --- | --- | --- | --- |
-| 1 (default) | Gemma 4 26B | `gemma4:26b` | ~18 GB | native | [CodeGem](https://shashikantjagtap.net/introducing-codegem-a-gemini-and-gemma-coding-harness-in-superqode/) (SuperQode) |
-| 2 | Qwen 3.8 27B | `qwen3.8:27b` | ~17 GB | native (Fane turns thinking off) | [Qwen Code](https://github.com/QwenLM/qwen-code) |
-| 3 | MiniCPM-V 4.7 35B (MoE, 3B active) | `openbmb/minicpm-v4.7:35b-a3b` | ~22 GB | native or JSON protocol* | SuperQode's DeepSeek harness (`ds4-coding`) |
+| Everyday (default) | Gemma 4 26B (MoE, 4B active) | `gemma4:26b` | ~17 GB | suggestions, requests, tools, vision | [CodeGem](https://shashikantjagtap.net/introducing-codegem-a-gemini-and-gemma-coding-harness-in-superqode/) (SuperQode) |
+| Coding | Qwen 3.8 27B | `qwen3.8:27b` | ~17 GB | coding tasks | [Qwen Code](https://github.com/QwenLM/qwen-code) (preferred) |
 
-\* Older Ollama releases don't support tool calls for MiniCPM-V 4.7, so Fane detects this and
-switches to asking for a JSON action instead. You can force either convention with
-`[model] tool_mode`.
+Both run with llama.cpp's speculative decoding (each model's MTP draft), which roughly
+doubles generation speed. On a Tesla V100 (32 GB), Gemma 4 26B generates about 130
+tokens/s (the same as Ollama) and Qwen 3.8 27B about MTP_QWEN tokens/s; on the NUC's Intel Iris
+Xe (Vulkan, shared memory) Gemma 4 runs at about 12 tokens/s. EVAL_LINE
 
-On a Tesla V100 (32 GB), `fane eval --harness` scored Gemma 4 26B and Qwen 3.8 100/100 on
-Fane's own tasks and MiniCPM 97.5 (it once delegated a fix without describing the error).
-Gemma 4 26B was the fastest: a median agent task took 2.9 s at 126 tokens/s, versus 3.7 s for
-MiniCPM and 5.8 s for Qwen 3.8. Each harness fixed the eval's failing test on its paired
-model: the DeepSeek harness in 18 s, CodeGem in 26 s and Qwen Code in 60 s.
-
-To use pairing 2 or 3, set the model and the harness:
+Any other model works too: anything Ollama has downloaded (by its Ollama name), or a GGUF
+file:
 
 ```toml
 [model]
-name = "qwen3.8:27b"
+name = "gpt-oss:20b"        # uses Ollama's download
 
-[delegate]
-default = "qwen"            # or "deepseek" with MiniCPM
+[runtime.models.my-model]   # or a file / Hugging Face download
+file = "hf:user/repo/model-Q4_K_M.gguf"
+mmproj = "hf:user/repo/mmproj.gguf"   # optional: lets it see screenshots
 ```
 
-These models are newer than older Ollama releases, so if a pull or load fails, update Ollama
-first. If the configured model isn't installed, Fane falls back through the list in order
-to whichever one you have. On a GPU with less than ~24 GB of memory, part of each model runs
-on the CPU, which slows the dense models the most; MiniCPM's mixture-of-experts design only
-activates 3B parameters per token, so it should hold up better. The
-[evaluation](#evaluating-models) measures all of this on your hardware.
-
-You can use a different model just for the background suggestions:
-
-```toml
-[model]
-name = "gemma4:26b"
-suggest_name = "openbmb/minicpm-v4.7:35b-a3b"
-```
-
-Both models only stay loaded at once if they fit in memory together. Otherwise Ollama
-swaps between them, which costs a reload every time.
+If the configured model isn't available, Fane falls back through `[model] fallbacks` in
+order. You can use a different model just for the background suggestions with
+`[model] suggest_name`; both stay loaded if they fit on the GPU together.
 
 ## Coding agents
 
 The `delegate` tool hands coding and long multi-step tasks to a command-line coding agent,
 run non-interactively in `[delegate] cwd` (your home folder by default). Fane offers the
-model every harness that's installed, with `[delegate] default` first:
+model every harness that's installed, best first: with `[delegate] default = "auto"`, Qwen
+Code on the coding model, then CodeGem, then Claude Code and Codex in the order of
+`[routes] code`.
 
 | Name | Install | Runs |
 | --- | --- | --- |
-| `codegem` (default) | `uv tool install superqode` | `superqode harness run codegem "<task>" --provider ollama --model <model> --working-dir <dir>` |
-| `qwen` | `npm install -g @qwen-code/qwen-code` ([Qwen Code](https://github.com/QwenLM/qwen-code)) | `qwen --auth-type openai --openai-base-url <ollama>/v1 --openai-api-key ollama -m <model> "<task>"` |
-| `deepseek` | `uv tool install superqode` (same package as CodeGem) | `superqode harness run ds4-coding "<task>" --provider ollama --model <model> --working-dir <dir>` |
+| `qwen` | `npm install -g @qwen-code/qwen-code` ([Qwen Code](https://github.com/QwenLM/qwen-code)) | `qwen --auth-type openai --openai-base-url <fane>/v1 --openai-api-key fane -m qwen3.8:27b "<task>"` |
+| `codegem` | `uv tool install superqode` | `superqode harness run codegem "<task>" --provider llamacpp --model gemma4:26b --working-dir <dir>` |
 | `claude` | [Claude Code](https://claude.com/claude-code) | `claude -p --permission-mode auto "<task>"` |
 | `codex` | [Codex](https://github.com/openai/codex) | `codex exec --skip-git-repo-check --approve-for-me "<task>"` |
 
-The three local harnesses run on the same Ollama model and server as Fane (including a
-server you picked in Settings), so nothing leaves your network and the model doesn't have to
-be loaded twice. CodeGem and the DeepSeek harness both come from
-[SuperQode](https://pypi.org/project/superqode/), a Python tool; Fane itself is a single Rust
-binary with no Python, so install SuperQode separately if you want either harness
+The local harnesses talk to Fane's model server, so they follow `[routes]` too: with
+`code = ["nuc", …]` Qwen Code on the laptop runs on the NUC's GPU. Nothing leaves your
+network. CodeGem comes from [SuperQode](https://pypi.org/project/superqode/), a Python tool;
+Fane itself is a single Rust binary with no Python, so install it separately if you want it
 (`fane doctor` shows what's missing and how to install it).
-(The npm package `run-deepseek-cli` was tried for pairing 3 but only talks to DeepSeek's
-cloud API, so it can't use a local model.)
 
 ### Planning and review by Claude
 
@@ -324,7 +397,7 @@ senior engineer for coding work it hands to a local harness:
 
 1. **Plan.** Claude reads the project (read-only: `claude -p --permission-mode plan`) and
    writes a concrete plan: which files to change, edge cases, how to verify.
-2. **Implement.** The local harness (CodeGem by default) makes the change, following the plan.
+2. **Implement.** The local harness (Qwen Code by default) makes the change, following the plan.
 3. **Review.** Fane takes a snapshot of the folder before and after, and Claude reviews exactly
    that diff against the task and the plan.
 4. **Fix.** If Claude finds problems, the harness fixes them, and Claude reviews again, for up
@@ -343,16 +416,17 @@ your Claude subscription and `codex login` done with your ChatGPT plan, delegate
 on those subscriptions. Fane never sees either credential. If `ANTHROPIC_API_KEY` or
 `OPENAI_API_KEY` is set in Fane's environment, the CLIs may use the API key instead.
 
-Every harness can be changed or added in the config. `{task}`, `{model}`, `{ollama_host}`
-and `{cwd}` are filled in; without a `{task}` argument the task goes last:
+Every harness can be changed or added in the config. `{task}`, `{model}` (the everyday
+model), `{code_model}`, `{base_url}` (Fane's model server, ending in `/v1`) and `{cwd}` are
+filled in; without a `{task}` argument the task goes last:
 
 ```toml
 [delegate.agents.qwen]                  # let Qwen Code edit files on its own
-cmd = ["qwen", "--openai-base-url", "{ollama_host}/v1", "--openai-api-key", "ollama",
-       "-m", "{model}", "--approval-mode", "auto-edit", "{task}"]
+cmd = ["qwen", "--auth-type", "openai", "--openai-base-url", "{base_url}", "--openai-api-key", "fane",
+       "-m", "{code_model}", "--approval-mode", "auto-edit", "{task}"]
 
 [delegate.agents.aider]                 # a harness Fane doesn't know about
-cmd = ["aider", "--model", "ollama_chat/{model}", "--yes", "--message", "{task}"]
+cmd = ["aider", "--model", "openai/{code_model}", "--openai-api-base", "{base_url}", "--yes", "--message", "{task}"]
 description = "Aider, editing files in the working directory"
 ```
 
@@ -365,7 +439,7 @@ synthetic screenshots and mock connectors, and then scores the results:
 
 ```bash
 fane pause                     # if Fane is running, so it doesn't compete for the GPU
-fane eval                      # all three recommended models
+fane eval                      # both recommended models
 fane eval --models qwen3.8:27b --only agent --repeat 3
 fane eval --list               # show the cases
 ```
@@ -400,10 +474,25 @@ and its default is listed in [`src/config.rs`](src/config.rs). The main ones:
 
 ```toml
 [model]
-name = "gemma4:26b"                     # falls back to the other recommended/installed models
-host = "http://127.0.0.1:11434"         # or pick one in Settings
+name = "gemma4:26b"                     # the everyday model
+code = "qwen3.8:27b"                    # the coding model
+host = ""                               # empty: Fane's own models; or an Ollama/OpenAI server
 suggest_name = ""                       # optional faster model for proactive suggestions
-num_ctx = 8192                          # keeps more of the model on the GPU
+
+[runtime]
+chat_gpu = "auto"                       # or an id from `fane gpus`; also code/image/video_gpu
+image_model = "z-image-turbo"           # "" = off; video_model = "wan2.2-5b"
+context = 32768
+idle_minutes = 15                       # stop idle models, freeing the GPU
+reuse_ollama = true                     # run Ollama's downloads instead of downloading again
+share = false                           # let other computers use this one's models (token)
+
+[routes]                                # see "Models, GPUs and other computers"
+code = ["local", "claude", "codex"]
+image = ["local", "codex"]
+
+[media]
+dir = "~/Pictures/Fane"                 # where generated images and videos go
 
 [suggestions]
 interval_seconds = 25
@@ -424,7 +513,7 @@ notes_dirs = ["~/Notes", "~/Obsidian"]
 roots = ["~"]                    # folders the file tools may use
 
 [delegate]
-default = "codegem"              # or qwen, deepseek, claude, codex (see Coding agents)
+default = "auto"                 # or qwen, codegem, claude, codex (see Coding agents)
 
 [agent_mail]
 account = "my-assistant@gmail.com"  # from Settings → Online Accounts; empty = email off
@@ -446,18 +535,24 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/Documents"]
  │  ├─ Palette (hotkey prompt box)      ├─ Suggester ─ every N s: look →  │
  │  ├─ Overlay (corner cards)           │    changed? → ask model for     │
  │  ├─ Settings                         │    ≤1 suggestion as JSON         │
- │  └─ Tray + hotkey                    ├─ Agent ─ tool loop on Ollama    │
+ │  └─ Tray + hotkey                    ├─ Agent ─ tool loop (OpenAI API) │
  │                                      ├─ Tools: notes, Thunderbird,     │
  │  `fane …` ──► local socket ─────────►│   windows, clipboard, paste,    │
- │                                      │   MCP, mail, delegate → CLIs    │
- │                                      └─ Ollama discovery, mail polling  │
- └────────────────────────────────────────────────────────────────────────┘
+ │                                      │   MCP, mail, files, images,     │
+ │                                      │   delegate → coding CLIs        │
+ │                                      └─ Model server :11500 ──┐        │
+ └───────────────────────────────────────────────────────────────┼────────┘
+     routes ([routes]) ─┬─ local: llama-server / sd-server per GPU, started on demand,
+                        │         GPUs shared by memory (least recently used idle model goes)
+                        ├─ another Fane (its model server, with its sharing token)
+                        └─ Ollama / stable-diffusion.cpp servers
 ```
 
 The source is laid out by concern: [`src/core.rs`](src/core.rs) (the runtime half),
 [`src/ui/`](src/ui/) (windows, tray), [`src/agent.rs`](src/agent.rs),
-[`src/suggester.rs`](src/suggester.rs), [`src/llm.rs`](src/llm.rs) (Ollama client),
-[`src/discovery.rs`](src/discovery.rs), [`src/connectors/`](src/connectors/),
+[`src/suggester.rs`](src/suggester.rs), [`src/llm.rs`](src/llm.rs) (model client),
+[`src/runtime/`](src/runtime/) (model server: GPUs, downloads, llama.cpp and
+stable-diffusion.cpp processes, GPU sharing, routing), [`src/discovery.rs`](src/discovery.rs), [`src/connectors/`](src/connectors/),
 [`src/mail/`](src/mail/), [`src/platform/`](src/platform/) (everything OS-specific) and
 [`src/evals/`](src/evals/).
 
@@ -493,10 +588,17 @@ pasting and the global hotkey.
   own address, and only when Google's DMARC check passes. Emailed requests get a reduced set
   of tools, and every message to anyone else needs your click. The Online Accounts token
   covers the whole mailbox, so give Fane an account of its own, not your personal one.
-- With a remote Ollama server, your prompts and screenshots cross the network over plain
-  HTTP, and Ollama itself has no login, so anyone who can reach the port can use it. Only
-  do this on a network you trust, or put the server behind a VPN like Tailscale (type its
-  address by hand; the scan only covers your local subnets).
+- Fane's model server only listens on `127.0.0.1` unless you turn on sharing. With sharing
+  on, other computers need its token (sent as a bearer token, compared in constant time);
+  without it they only learn that a Fane is there. Requests from this computer need no token,
+  so any program running as you can use the models (as with Ollama).
+- Sharing, remote Fanes and remote Ollama servers use plain HTTP: prompts, screenshots, the
+  token and generated images cross the network unencrypted. Only do this on a network you
+  trust, or over a VPN like Tailscale (type the address by hand; the scan only covers your
+  local subnets).
+- llama.cpp and stable-diffusion.cpp come from their projects' GitHub releases (pinned to the
+  builds this Fane was tested with), or from Fane's own release of stable-diffusion.cpp for
+  Linux; models come from Hugging Face. All of it goes into `~/.fane`.
 - Coding agents run non-interactively in `[delegate] cwd`, so nobody is there to approve
   their actions. Claude Code runs in its auto mode (its classifier approves safe actions and
   blocks risky ones) and Codex with `--approve-for-me` (automatic review, sandboxed to the

@@ -1,7 +1,8 @@
 name: Setup smoke test
 
-# Run by hand: installs Ollama with `fane setup` on clean macOS and Windows runners and
-# downloads a small model (not the 18 GB default) to check the whole path works.
+# Run by hand: on clean macOS and Windows runners, `fane setup` gets llama.cpp and a small model
+# (not the 16 GB default), then `fane serve` answers a chat request with it -- the whole path
+# from download to the OpenAI-compatible server.
 
 on:
   workflow_dispatch:
@@ -17,27 +18,47 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
-      - name: fane setup (macOS)
+      - name: Config with a small model
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then dir="$APPDATA/fane"; else dir="$HOME/Library/Application Support/fane"; fi
+          mkdir -p "$dir"
+          cat > "$dir/config.toml" <<'TOML'
+          [model]
+          name = "tiny"
+          [runtime.models.tiny]
+          file = "hf:ggml-org/gemma-3-270m-it-GGUF/gemma-3-270m-it-Q8_0.gguf"
+          TOML
+      - name: fane setup, then chat through fane serve (macOS)
         if: runner.os == 'macOS'
         run: |
-          target/release/fane setup --yes --model all-minilm
-          target/release/fane setup --model all-minilm
-          target/release/fane doctor | grep -iE "ollama|model"
-      - name: fane setup (Windows)
+          target/release/fane setup --yes
+          target/release/fane setup | grep "Nothing to do"
+          target/release/fane gpus
+          target/release/fane serve &
+          for i in $(seq 30); do curl -sf http://127.0.0.1:11500/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:11500/v1/chat/completions -H 'content-type: application/json' \
+            -d '{"model":"tiny","messages":[{"role":"user","content":"Say hi"}],"max_tokens":16}' | tee reply.json
+          grep -q '"content"' reply.json
+      - name: fane setup, then chat through fane serve (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # fane.exe is a GUI-subsystem program, so wait for it explicitly -- but only for fane
-          # itself: `Start-Process -Wait` would also wait for the Ollama server it leaves running.
-          foreach ($a in @('setup --yes --model all-minilm', 'setup --model all-minilm')) {
+          # fane.exe is a GUI-subsystem program, so wait for it explicitly.
+          foreach ($a in @('setup --yes', 'gpus')) {
             $p = Start-Process -FilePath target\release\fane.exe -ArgumentList $a -NoNewWindow -PassThru
-            if (-not $p.WaitForExit(1200000)) { $p.Kill(); throw "fane $a timed out" }
+            if (-not $p.WaitForExit(1800000)) { $p.Kill(); throw "fane $a timed out" }
             if ($p.ExitCode -ne 0) { throw "fane $a failed ($($p.ExitCode))" }
           }
-          (Invoke-RestMethod http://127.0.0.1:11434/api/tags).models.name
+          Start-Process -FilePath target\release\fane.exe -ArgumentList 'serve' -NoNewWindow
+          foreach ($i in 1..30) { try { Invoke-RestMethod http://127.0.0.1:11500/health; break } catch { Start-Sleep 1 } }
+          $body = '{"model":"tiny","messages":[{"role":"user","content":"Say hi"}],"max_tokens":16}'
+          $r = Invoke-RestMethod http://127.0.0.1:11500/v1/chat/completions -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 600
+          $r.choices[0].message | ConvertTo-Json
+          if (-not $r.choices[0].message) { throw "no reply" }

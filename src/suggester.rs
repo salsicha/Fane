@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::config::SuggestionsCfg;
-use crate::llm::{LlmResult, Ollama, encode_image};
+use crate::llm::{Llm, LlmResult, encode_image};
 use crate::snapshot::{Snapshot, change_ratio};
 
 fn schema() -> Value {
@@ -87,7 +87,7 @@ pub fn text_of(v: &Value) -> String {
 }
 
 pub struct Suggester {
-    llm: Arc<Ollama>,
+    llm: Arc<Llm>,
     cfg: SuggestionsCfg,
     max_image_side: u32,
     pub history: Vec<String>,
@@ -101,7 +101,7 @@ pub struct Suggester {
 }
 
 impl Suggester {
-    pub fn new(llm: Arc<Ollama>, cfg: SuggestionsCfg, max_image_side: u32) -> Self {
+    pub fn new(llm: Arc<Llm>, cfg: SuggestionsCfg, max_image_side: u32) -> Self {
         Self {
             llm,
             cfg,
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn dismissals_back_off() {
-        let llm = Arc::new(Ollama::new(&Default::default()));
+        let llm = Arc::new(Llm::new(&Default::default(), "http://127.0.0.1:1"));
         let mut s = Suggester::new(llm, SuggestionsCfg::default(), 1280);
         let snap = Snapshot::with_image(Default::default(), image::DynamicImage::new_rgb8(4, 4));
         assert!(s.should_look(&snap, false));

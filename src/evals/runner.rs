@@ -16,13 +16,13 @@ use crate::config::{Config, RECOMMENDED_MODELS, STATE_DIR};
 use crate::evals::harness::{self, HarnessRecord, paired_harness};
 use crate::evals::scenarios::{AgentTask, Delegation, Mocks, SUGGEST_CASES, SuggestCase, agent_tasks};
 use crate::evals::scenes::{scene, scenes};
-use crate::llm::{LlmResult, Ollama, find_installed, truncate};
+use crate::llm::{Llm, LlmResult, find_installed, truncate};
 use crate::snapshot::{Snapshot, WindowInfo};
 use crate::suggester::Suggester;
 
 #[derive(Debug, Clone, Default)]
 pub struct EvalOptions {
-    /// Ollama tags; empty means `config::RECOMMENDED_MODELS`.
+    /// Model names; empty means `config::RECOMMENDED_MODELS`.
     pub models: Vec<String>,
     /// Run each case N times (0 is treated as 1).
     pub repeat: usize,
@@ -357,18 +357,18 @@ impl EvalRunner {
         let mut report = ModelReport { model: name.into(), status: "ok".into(), ..Default::default() };
         let mut mcfg = self.cfg.model.clone();
         mcfg.name = name.into();
-        let llm = Arc::new(Ollama::new(&mcfg));
+        let llm = Arc::new(Llm::new(&mcfg, &self.cfg.llm_host()));
         let installed = match llm.installed_models().await {
             Ok(i) => i,
             Err(e) => {
                 report.status = "error".into();
-                report.error = Some(format!("Ollama unreachable: {e}"));
+                report.error = Some(format!("model server unreachable: {e}"));
                 return report;
             }
         };
         let Some(resolved) = find_installed(name, &installed) else {
             report.status = "missing".into();
-            report.error = Some(format!("not installed — run: ollama pull {name}"));
+            report.error = Some(format!("not available — run: fane setup --model {name}"));
             return report;
         };
         llm.set_model(&resolved);
@@ -383,18 +383,17 @@ impl EvalRunner {
         report
     }
 
-    async fn evaluate_loaded(&self, llm: &Arc<Ollama>, resolved: &str, report: &mut ModelReport) -> LlmResult<()> {
+    async fn evaluate_loaded(&self, llm: &Arc<Llm>, resolved: &str, report: &mut ModelReport) -> LlmResult<()> {
         unload_all(llm).await;
         println!("\n▶ {resolved}: loading…");
         let t0 = Instant::now();
         llm.chat(&[json!({"role": "user", "content": "Reply with OK."})], None, None, None).await?;
         report.load_s = Some(round_to(t0.elapsed().as_secs_f64(), 1));
         if let Some(ps) = llm.loaded().await {
-            let size = ps["size"].as_f64().unwrap_or(0.0);
-            let vram = ps["size_vram"].as_f64().unwrap_or(0.0);
-            report.size_gb = Some(round_to(size / 1e9, 1));
-            report.vram_pct = (size > 0.0).then(|| round_int(100.0 * vram / size));
-            report.context = Some(ps.get("context_length").cloned().unwrap_or(Value::Null));
+            let mb = ps["vram_mb"].as_f64().unwrap_or(0.0);
+            report.size_gb = Some(round_to(mb / 1024.0, 1));
+            report.vram_pct = Some(if ps["gpu"] == "cpu" { 0 } else { 100 });
+            report.context = Some(json!(self.cfg.runtime.context));
         }
         let none = || "None".to_string();
         println!(
@@ -447,7 +446,7 @@ impl EvalRunner {
         Ok(())
     }
 
-    async fn suggest_case(&self, llm: &Arc<Ollama>, case: &SuggestCase) -> SuggestRecord {
+    async fn suggest_case(&self, llm: &Arc<Llm>, case: &SuggestCase) -> SuggestRecord {
         let snap = snap(case.scene);
         let sug = Suggester::new(llm.clone(), self.cfg.suggestions.clone(), self.cfg.model.max_image_side);
         let mut rec =
@@ -496,7 +495,7 @@ impl EvalRunner {
         rec
     }
 
-    async fn agent_task(&self, llm: &Arc<Ollama>, task: &AgentTask, modes: &ToolModes) -> AgentRecord {
+    async fn agent_task(&self, llm: &Arc<Llm>, task: &AgentTask, modes: &ToolModes) -> AgentRecord {
         let mocks = Mocks::new();
         let registry = mocks.registry();
         let mut agent = Agent::new(llm.clone(), registry.clone(), self.cfg.model.clone(), modes.clone());
@@ -605,10 +604,10 @@ impl EvalRunner {
             started: started.format("%Y-%m-%dT%H:%M:%S").to_string(),
             duration_s,
             machine: machine_info(),
-            ollama_version: Ollama::new(m).version().await,
+            ollama_version: Llm::new(m, &self.cfg.llm_host()).version().await,
             settings: Settings {
                 repeat: self.repeat,
-                num_ctx: m.num_ctx,
+                num_ctx: self.cfg.runtime.context,
                 temperature: m.temperature,
                 max_image_side: m.max_image_side,
                 min_confidence: self.min_conf,
@@ -620,8 +619,32 @@ impl EvalRunner {
     }
 }
 
+/// Start a model server in this process if none is answering (and chat isn't elsewhere).
+async fn serve_for_eval(cfg: &Config) -> Option<(Arc<crate::runtime::Runtime>, tokio::sync::oneshot::Sender<()>)> {
+    if !cfg.model.host.trim().is_empty() || crate::runtime::router::answering(&cfg.runtime.url()).await {
+        return None;
+    }
+    let rt = crate::runtime::Runtime::new(cfg.clone());
+    let listener = match crate::runtime::router::bind(&cfg.runtime).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Can't start Fane's model server: {e}");
+            return None;
+        }
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let rt2 = rt.clone();
+    tokio::spawn(async move {
+        let _ = crate::runtime::router::run(listener, rt2, async {
+            let _ = rx.await;
+        })
+        .await;
+    });
+    Some((rt, tx))
+}
+
 /// Free VRAM (including the candidate itself) so every model gets a cold, equal start.
-async fn unload_all(llm: &Ollama) {
+async fn unload_all(llm: &Llm) {
     let Ok(running) = llm.running().await else { return };
     for m in &running {
         if let Some(name) = m["name"].as_str() {
@@ -753,7 +776,7 @@ pub fn to_markdown(res: &EvalResults) -> String {
         format!("# Fane model eval — {}", res.started),
         String::new(),
         format!(
-            "Machine: {}, {} GB RAM · Ollama {} · num_ctx {} · temperature {} · image ≤{}px · repeat ×{} · took {} min",
+            "Machine: {}, {} GB RAM · {} · num_ctx {} · temperature {} · image ≤{}px · repeat ×{} · took {} min",
             res.machine.gpu.as_deref().unwrap_or("unknown GPU"),
             res.machine.ram_gb.map_or_else(|| "?".to_string(), |r| r.to_string()),
             res.ollama_version,
@@ -986,6 +1009,8 @@ pub fn list_cases() -> Vec<String> {
 
 /// Run the suite, print progress and the report, save results; returns the exit code.
 pub async fn run(cfg: Config, opts: EvalOptions) -> anyhow::Result<i32> {
+    // Fane's model server: the running app's (or service's), else one just for the eval.
+    let _server = serve_for_eval(&cfg).await;
     let models: Vec<String> = if opts.models.is_empty() {
         RECOMMENDED_MODELS.iter().map(|s| s.to_string()).collect()
     } else {
@@ -1084,7 +1109,7 @@ mod tests {
         let missing = ModelReport {
             model: "nope:1b".into(),
             status: "missing".into(),
-            error: Some("not installed — run: ollama pull nope:1b".into()),
+            error: Some("not available — run: fane setup --model nope:1b".into()),
             ..Default::default()
         };
         vec![a, b, missing]
@@ -1144,7 +1169,7 @@ mod tests {
             md.starts_with("# Fane model eval — 2026-11-07T14:05:00\n\nMachine: NVIDIA RTX 5090, 32607 MiB, 64 GB RAM")
         );
         assert!(md.contains("image ≤1280px · repeat ×1 · took 12 min"));
-        assert!(md.contains("- **nope:1b**: missing — not installed — run: ollama pull nope:1b"));
+        assert!(md.contains("- **nope:1b**: missing — not available — run: fane setup --model nope:1b"));
         assert!(md.contains("## Summary\n\n| | big:31b | small:4b |\n|---|---|---|\n"));
         assert!(md.contains("| **Quality score** (0–100) | 70.0 | 28.3 |"));
         assert!(md.contains("| Screen understanding | 2/3 | 2/3 |"));

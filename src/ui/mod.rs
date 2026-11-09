@@ -389,7 +389,7 @@ impl App {
             OverlayAction::Insert(t) => self.insert(t),
             OverlayAction::Open(t) => self.core.open_palette(String::new(), false, Some(t)),
             OverlayAction::Copy(t) => self.copy(t),
-            OverlayAction::SetupAccepted => self.core.run_setup(),
+            OverlayAction::SetupAccepted => self.core.run_setup(crate::setup::Want::default()),
             OverlayAction::SetupDeclined => self.core.decline_setup(),
         }
         self.update_busy();
@@ -421,15 +421,48 @@ impl App {
         match a {
             SettingsAction::Scan => {
                 self.rt.spawn(async move {
-                    let servers = core.discover_ollama().await;
+                    let servers = core.discover_servers().await;
                     let _ = proxy.send_event(UiEvent::Servers(Ok(servers)));
                 });
             }
-            SettingsAction::UseServer(url) => {
+            SettingsAction::UseServer(url, token) => {
                 self.rt.spawn(async move {
-                    let r = core.use_ollama(&url).await;
-                    let _ = proxy.send_event(UiEvent::OllamaUsed(r));
+                    let r = core.use_server(&url, &token).await;
+                    let _ = proxy.send_event(UiEvent::ServerUsed(r));
                 });
+            }
+            SettingsAction::RefreshModels => {
+                self.rt.spawn(async move {
+                    let info = core.models_info().await;
+                    let _ = proxy.send_event(UiEvent::ModelsInfo(info));
+                });
+            }
+            SettingsAction::UseOwnModels
+            | SettingsAction::RemoveRemote(_)
+            | SettingsAction::SetRoute(..)
+            | SettingsAction::SetGpu(..)
+            | SettingsAction::SetShare(_)
+            | SettingsAction::SetService(_) => {
+                self.rt.spawn(async move {
+                    let r = match a {
+                        SettingsAction::UseOwnModels => core.use_own_models().await,
+                        SettingsAction::RemoveRemote(name) => core.remove_remote(&name).await,
+                        SettingsAction::SetRoute(role, targets) => core.set_route(role, targets).await,
+                        SettingsAction::SetGpu(role, gpu) => core.set_role_gpu(role, &gpu).await,
+                        SettingsAction::SetShare(on) => core.set_share(on).await.map(|t| {
+                            if on { format!("Sharing on; the token is {t}") } else { "Sharing is off".into() }
+                        }),
+                        SettingsAction::SetService(on) => core.set_service(on).await,
+                        _ => unreachable!(),
+                    };
+                    let _ = proxy.send_event(UiEvent::ModelsStatus(r));
+                });
+            }
+            SettingsAction::Install(want) => self.core.run_setup(want),
+            SettingsAction::Copy(text) => {
+                let core = self.core.clone();
+                self.rt.spawn(async move { core.copy_text(text).await });
+                self.overlay.toast("Copied", 2);
             }
             SettingsAction::RefreshAccounts => {
                 self.rt.spawn(async move {
@@ -457,7 +490,6 @@ impl App {
                     tracing::warn!("cannot open {}: {e}", CONFIG_PATH.display());
                 }
             }
-            SettingsAction::Setup => self.core.run_setup(),
             SettingsAction::ForgetPref(id) => {
                 if let Some(p) = self.core.prefs.forget(id) {
                     self.overlay.toast(&format!("Forgot: {}", p.text), 4);
@@ -635,9 +667,25 @@ impl ApplicationHandler<UiEvent> for App {
                     self.show_overlay(event_loop);
                 }
             }
-            UiEvent::SetupOffer(text) => {
-                self.overlay.show_offer(&text);
+            UiEvent::SetupOffer { title, text } => {
+                self.overlay.show_offer(&title, &text);
                 self.show_overlay(event_loop);
+            }
+            UiEvent::ModelsChanged => {
+                self.settings.set_cfg(self.core.cfg());
+                if self.visible.contains(&WindowKind::Settings) {
+                    self.on_settings_action(SettingsAction::RefreshModels);
+                }
+            }
+            UiEvent::ModelsInfo(info) => {
+                self.settings.show_models(info);
+                self.redraw(WindowKind::Settings);
+            }
+            UiEvent::ModelsStatus(r) => {
+                self.settings.set_cfg(self.core.cfg());
+                self.settings.models_status(r);
+                self.on_settings_action(SettingsAction::RefreshModels);
+                self.redraw(WindowKind::Settings);
             }
             UiEvent::Working { job, title } => {
                 self.jobs.insert(job, (Origin::Overlay, title.clone()));
@@ -678,7 +726,7 @@ impl ApplicationHandler<UiEvent> for App {
                 self.settings.show_servers(r);
                 self.redraw(WindowKind::Settings);
             }
-            UiEvent::OllamaUsed(r) => {
+            UiEvent::ServerUsed(r) => {
                 self.settings.use_done(r);
                 self.redraw(WindowKind::Settings);
             }
