@@ -89,6 +89,14 @@ pub fn command(bin: &Path) -> tokio::process::Command {
     {
         cmd.creation_flags(0x0800_0000); // no console window
     }
+    // If Fane dies without stopping it, the model server goes too (and frees the GPU).
+    #[cfg(target_os = "linux")]
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
+    }
     cmd
 }
 

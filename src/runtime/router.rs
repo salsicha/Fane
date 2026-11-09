@@ -501,13 +501,20 @@ mod tests {
         url
     }
 
+    /// Nothing on "this computer": an empty home and no Ollama models. (The home is global, so
+    /// every test here uses the same one.)
+    fn bare_cfg() -> Config {
+        let mut cfg = Config::default();
+        cfg.runtime.home =
+            std::env::temp_dir().join(format!("fane-router-{}", std::process::id())).display().to_string();
+        cfg.runtime.reuse_ollama = false;
+        cfg
+    }
+
     #[tokio::test]
     async fn routes_to_the_next_target_with_its_token_and_name() {
         let remote = fake_remote().await;
-        let mut cfg = Config::default();
-        let home = std::env::temp_dir().join(format!("fane-router-{}", std::process::id()));
-        cfg.runtime.home = home.display().to_string();
-        cfg.runtime.reuse_ollama = false; // nothing on "this computer"
+        let mut cfg = bare_cfg();
         cfg.remotes.insert("nuc".into(), RemoteCfg { url: remote, token: "s3cret".into(), kind: String::new() });
         cfg.routes.code = vec!["local".into(), "nuc".into(), "claude".into()];
         cfg.routes.image = vec!["nuc".into()];
@@ -549,7 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn other_computers_need_the_token() {
-        let mut cfg = Config::default();
+        let mut cfg = bare_cfg();
         let rt = Runtime::new(cfg.clone());
         let lan: SocketAddr = "192.168.1.9:5000".parse().unwrap();
         let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
