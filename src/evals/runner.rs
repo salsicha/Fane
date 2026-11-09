@@ -36,6 +36,8 @@ pub struct EvalOptions {
     pub out: Option<PathBuf>,
     /// Also give each model's paired coding harness a real failing-test task.
     pub harness: bool,
+    /// In the harness task, let Claude Code/Codex plan and review (uses that subscription).
+    pub advisor: bool,
 }
 
 // --- Python-compatible number formatting ---------------------------------------------
@@ -324,6 +326,7 @@ pub struct EvalRunner {
     timeout: Duration,
     min_conf: f64,
     harness: bool,
+    advisor: bool,
 }
 
 impl EvalRunner {
@@ -336,6 +339,7 @@ impl EvalRunner {
             only: opts.only.clone(),
             select: opts.filter.clone(),
             harness: opts.harness || opts.only.as_deref() == Some("harness"),
+            advisor: opts.advisor,
             timeout: Duration::from_secs_f64(timeout),
         }
     }
@@ -425,7 +429,7 @@ impl EvalRunner {
         if self.harness {
             let name = paired_harness(resolved, &self.cfg);
             println!("  harness {name}: fixing a failing test…");
-            let r = harness::run_task(&self.cfg, &name, resolved, &llm.host(), self.timeout).await;
+            let r = harness::run_task(&self.cfg, &name, resolved, &llm.host(), self.timeout, self.advisor).await;
             let verdict = if !r.available {
                 "not installed".to_string()
             } else {

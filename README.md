@@ -246,6 +246,27 @@ binary with no Python, so install SuperQode separately if you want either harnes
 (The npm package `run-deepseek-cli` was tried for pairing 3 but only talks to DeepSeek's
 cloud API, so it can't use a local model.)
 
+### Planning and review by Claude
+
+When Claude Code is installed and signed in (or Codex, if Claude Code isn't), Fane uses it as a
+senior engineer for coding work it hands to a local harness:
+
+1. **Plan.** Claude reads the project (read-only: `claude -p --permission-mode plan`) and
+   writes a concrete plan: which files to change, edge cases, how to verify.
+2. **Implement.** The local harness (CodeGem by default) makes the change, following the plan.
+3. **Review.** Fane takes a snapshot of the folder before and after, and Claude reviews exactly
+   that diff against the task and the plan.
+4. **Fix.** If Claude finds problems, the harness fixes them, and Claude reviews again, for up
+   to `[delegate] review_rounds` rounds (2 by default).
+
+The model gets the plan, the harness's output and the final verdict back, and the progress
+card shows each step. Snapshots use a private git index (inside a repository) or a throwaway
+repository beside the folder (for small plain folders), so your own git state isn't touched;
+your home folder and folders with more than 5,000 files outside a repository are planned but
+not reviewed. If Claude isn't signed in or fails, the harness works on its own and the result
+says so. `[delegate] advisor` is `"auto"` (Claude Code, else Codex), `"claude"`, `"codex"` or
+`"off"`. Tasks given to Claude Code or Codex directly don't get an extra reviewer.
+
 Claude Code and Codex use whatever sign-in you've given them, so with `claude` logged in to
 your Claude subscription and `codex login` done with your ChatGPT plan, delegated tasks run
 on those subscriptions. Fane never sees either credential. If `ANTHROPIC_API_KEY` or
@@ -285,6 +306,9 @@ fane eval --list               # show the cases
 | Staying quiet | No confident suggestion appears on an idle desktop or while browsing photos. |
 | Agent tasks | Seven tasks scored on the tool trace: replying at the cursor without preamble, looking up email, opening and summarizing a note, reading an error off the screen, delegating a code fix, rewriting the clipboard, and answering from an MCP calendar tool. Unnecessary actions are penalized, such as delegating or inserting when the user only asked a question. |
 | Speed and fit | Median latency for suggestions and for agent tasks, tokens per second, tool calls and tokens per task, hidden reasoning (some models think even when asked not to, which is where the latency goes), how much of the model is on the GPU, and cold load time. |
+
+`fane eval --harness --advisor` runs that task with Claude (or Codex) planning and reviewing,
+as Fane does in normal use; it uses that subscription.
 
 `fane eval --harness` (or `--only harness`) also gives each model's paired coding harness a
 small Python project whose test fails with a KeyError, asks it to fix the bug, and then runs

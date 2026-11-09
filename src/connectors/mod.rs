@@ -4,4 +4,5 @@ pub mod builtin;
 pub mod delegate;
 pub mod mcp;
 pub mod notes;
+pub mod review;
 pub mod thunderbird;

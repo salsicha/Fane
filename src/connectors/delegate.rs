@@ -18,7 +18,7 @@ pub struct Vars {
 
 pub struct Delegate {
     pub cfg: DelegateCfg,
-    agents: Vec<(String, AgentCfg)>,
+    pub(crate) agents: Vec<(String, AgentCfg)>,
 }
 
 /// Fill in `{task}`, `{model}`, `{ollama_host}` and `{cwd}`.
@@ -32,7 +32,7 @@ impl Delegate {
         Self { cfg, agents }
     }
 
-    fn agent(&self, name: &str) -> Option<&AgentCfg> {
+    pub(crate) fn agent(&self, name: &str) -> Option<&AgentCfg> {
         self.agents.iter().find(|(n, _)| n == name).map(|(_, a)| a)
     }
 
@@ -52,73 +52,101 @@ impl Delegate {
             let names: Vec<&str> = self.agents.iter().map(|(n, _)| n.as_str()).collect();
             return format!("error: unknown agent {agent:?} (configured: {})", names.join(", "));
         };
-        let Some((program, args)) = spec.cmd.split_first() else {
-            return format!("error: no command configured for {agent}");
-        };
-        let Ok(program_path) = which::which(program) else {
-            return format!("error: {program} is not installed");
-        };
-        let workdir = expand(if cwd.trim().is_empty() { &self.cfg.cwd } else { cwd });
-        let model = if spec.model.is_empty() { vars.model.as_str() } else { spec.model.as_str() };
-        let dir = workdir.display().to_string();
-        let fill = |t: &str| fill(t, task, model, &vars.ollama_host, &dir);
-        let mut argv: Vec<String> = args.iter().map(|a| fill(a)).collect();
-        if !spec.cmd.iter().any(|a| a.contains("{task}")) {
-            argv.push(task.to_string());
-        }
-        let mut cmd = Command::new(program_path);
-        cmd.args(&argv);
-        for (k, v) in &spec.env {
-            cmd.env(k, fill(v));
-        }
-        let mut child = match cmd
-            .current_dir(&workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => return format!("error: could not start {agent} in {}: {e}", workdir.display()),
-        };
-
-        let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            return format!("error: could not capture {agent} output");
-        };
-        let collect = async {
-            // stdout and stderr interleaved in arrival order.
-            let mut out = Vec::new();
-            let (mut b1, mut b2) = ([0u8; 8192], [0u8; 8192]);
-            let (mut done1, mut done2) = (false, false);
-            while !(done1 && done2) {
-                tokio::select! {
-                    r = stdout.read(&mut b1), if !done1 => match r {
-                        Ok(n) if n > 0 => out.extend_from_slice(&b1[..n]),
-                        _ => done1 = true,
-                    },
-                    r = stderr.read(&mut b2), if !done2 => match r {
-                        Ok(n) if n > 0 => out.extend_from_slice(&b2[..n]),
-                        _ => done2 = true,
-                    },
-                }
-            }
-            out
-        };
-        let out = match tokio::time::timeout(Duration::from_secs(self.cfg.timeout), collect).await {
-            Ok(out) => out,
-            Err(_) => {
-                let _ = child.kill().await;
-                return format!("error: {agent} timed out after {}s", self.cfg.timeout);
-            }
-        };
-        let code = match child.wait().await {
-            Ok(status) => status.code().map_or_else(|| "signal".to_string(), |c| c.to_string()),
-            Err(_) => "unknown".into(),
-        };
-        let text = clip_output(String::from_utf8_lossy(&out).trim());
-        if text.is_empty() { format!("{agent} finished with no output (exit {code})") } else { text }
+        exec(&agent, spec, task, &self.workdir(cwd), vars, Duration::from_secs(self.cfg.timeout)).await
     }
+
+    pub fn workdir(&self, cwd: &str) -> std::path::PathBuf {
+        expand(if cwd.trim().is_empty() { &self.cfg.cwd } else { cwd })
+    }
+}
+
+/// Run one command-line agent non-interactively and collect its output (or "error: ...").
+pub async fn exec(
+    label: &str,
+    spec: &AgentCfg,
+    task: &str,
+    workdir: &std::path::Path,
+    vars: &Vars,
+    timeout: Duration,
+) -> String {
+    exec_status(label, spec, task, workdir, vars, timeout).await.0
+}
+
+/// Like `exec`, plus whether the command ran and exited successfully.
+pub async fn exec_status(
+    label: &str,
+    spec: &AgentCfg,
+    task: &str,
+    workdir: &std::path::Path,
+    vars: &Vars,
+    timeout: Duration,
+) -> (String, bool) {
+    let Some((program, args)) = spec.cmd.split_first() else {
+        return (format!("error: no command configured for {label}"), false);
+    };
+    let Ok(program_path) = which::which(program) else {
+        return (format!("error: {program} is not installed"), false);
+    };
+    let model = if spec.model.is_empty() { vars.model.as_str() } else { spec.model.as_str() };
+    let dir = workdir.display().to_string();
+    let fill = |t: &str| fill(t, task, model, &vars.ollama_host, &dir);
+    let mut argv: Vec<String> = args.iter().map(|a| fill(a)).collect();
+    if !spec.cmd.iter().any(|a| a.contains("{task}")) {
+        argv.push(task.to_string());
+    }
+    let mut cmd = Command::new(program_path);
+    cmd.args(&argv);
+    for (k, v) in &spec.env {
+        cmd.env(k, fill(v));
+    }
+    let mut child = match cmd
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return (format!("error: could not start {label} in {}: {e}", workdir.display()), false),
+    };
+
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return (format!("error: could not capture {label} output"), false);
+    };
+    let collect = async {
+        // stdout and stderr interleaved in arrival order.
+        let mut out = Vec::new();
+        let (mut b1, mut b2) = ([0u8; 8192], [0u8; 8192]);
+        let (mut done1, mut done2) = (false, false);
+        while !(done1 && done2) {
+            tokio::select! {
+                r = stdout.read(&mut b1), if !done1 => match r {
+                    Ok(n) if n > 0 => out.extend_from_slice(&b1[..n]),
+                    _ => done1 = true,
+                },
+                r = stderr.read(&mut b2), if !done2 => match r {
+                    Ok(n) if n > 0 => out.extend_from_slice(&b2[..n]),
+                    _ => done2 = true,
+                },
+            }
+        }
+        out
+    };
+    let out = match tokio::time::timeout(timeout, collect).await {
+        Ok(out) => out,
+        Err(_) => {
+            let _ = child.kill().await;
+            return (format!("error: {label} timed out after {}s", timeout.as_secs()), false);
+        }
+    };
+    let (code, ok) = match child.wait().await {
+        Ok(status) => (status.code().map_or_else(|| "signal".to_string(), |c| c.to_string()), status.success()),
+        Err(_) => ("unknown".into(), false),
+    };
+    let text = clip_output(String::from_utf8_lossy(&out).trim());
+    let text = if text.is_empty() { format!("{label} finished with no output (exit {code})") } else { text };
+    (text, ok)
 }
 
 /// Keep long output readable: the first 2000 and last 10000 chars of anything over 12000.

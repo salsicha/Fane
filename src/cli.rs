@@ -136,6 +136,10 @@ struct EvalArgs {
     /// failing test
     #[arg(long)]
     harness: bool,
+    /// In the harness task, have Claude Code (or Codex) plan and review the local harness's
+    /// work, as Fane does when they're installed (uses that subscription)
+    #[arg(long)]
+    advisor: bool,
     /// Only cases whose name contains this
     #[arg(long)]
     filter: Option<String>,
@@ -517,6 +521,14 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
             };
             println!("{} delegate to {name} ({program}{default}){hint}", ok(installed));
         }
+        match crate::connectors::review::advisor(&cfg.delegate) {
+            Some((name, _)) => println!(
+                "{} planning and review: {} (must be signed in; `[delegate] advisor`)",
+                ok(true),
+                if name == "claude" { "Claude Code" } else { "Codex" }
+            ),
+            None => println!("  planning and review: off (install Claude Code or Codex, or set `[delegate] advisor`)"),
+        }
         let mail = &cfg.agent_mail.account;
         println!(
             "{} Fane's email: {}",
@@ -573,7 +585,8 @@ fn cmd_eval(args: EvalArgs) -> anyhow::Result<i32> {
         filter: args.filter,
         timeout_s: args.timeout,
         out: args.out,
-        harness: args.harness,
+        harness: args.harness || args.advisor,
+        advisor: args.advisor,
     };
     runtime().block_on(run(cfg, opts))
 }

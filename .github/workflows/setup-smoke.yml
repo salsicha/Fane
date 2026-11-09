@@ -19,6 +19,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -34,9 +35,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # fane.exe is a GUI-subsystem program, so wait for it explicitly.
-          $p = Start-Process -FilePath target\release\fane.exe -ArgumentList 'setup','--yes','--model','all-minilm' -Wait -NoNewWindow -PassThru
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
-          $p = Start-Process -FilePath target\release\fane.exe -ArgumentList 'setup','--model','all-minilm' -Wait -NoNewWindow -PassThru
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          # fane.exe is a GUI-subsystem program, so wait for it explicitly -- but only for fane
+          # itself: `Start-Process -Wait` would also wait for the Ollama server it leaves running.
+          foreach ($a in @('setup --yes --model all-minilm', 'setup --model all-minilm')) {
+            $p = Start-Process -FilePath target\release\fane.exe -ArgumentList $a -NoNewWindow -PassThru
+            if (-not $p.WaitForExit(1200000)) { $p.Kill(); throw "fane $a timed out" }
+            if ($p.ExitCode -ne 0) { throw "fane $a failed ($($p.ExitCode))" }
+          }
           (Invoke-RestMethod http://127.0.0.1:11434/api/tags).models.name

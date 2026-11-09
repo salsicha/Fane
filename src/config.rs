@@ -233,6 +233,11 @@ impl Default for ConnectorsCfg {
 pub struct DelegateCfg {
     /// The coding harness offered to the model first.
     pub default: String,
+    /// A frontier model that plans and reviews coding work handed to a local harness:
+    /// "auto" (Claude Code if installed, else Codex), "claude", "codex", or "off".
+    pub advisor: String,
+    /// After the local harness's attempt: how many review → fix rounds at most.
+    pub review_rounds: u32,
     pub timeout: u64,
     pub cwd: String,
     /// Harnesses added to (or replacing) the built-in ones, by name.
@@ -332,7 +337,7 @@ pub fn builtin_agents() -> Vec<(&'static str, AgentCfg)> {
             ),
         ),
         ("claude", agent(&["claude", "-p", "{task}"], &[], "Claude Code (the user's Claude subscription)")),
-        ("codex", agent(&["codex", "exec", "{task}"], &[], "Codex (the user's ChatGPT plan)")),
+        ("codex", agent(&["codex", "exec", "--skip-git-repo-check", "{task}"], &[], "Codex (the user's ChatGPT plan)")),
     ]
 }
 
@@ -374,6 +379,8 @@ impl Default for DelegateCfg {
     fn default() -> Self {
         Self {
             default: "codegem".into(),
+            advisor: "auto".into(),
+            review_rounds: 2,
             timeout: 900,
             cwd: "~".into(),
             agents: BTreeMap::new(),
@@ -479,6 +486,9 @@ notes_dirs = ["~/Notes", "~/Documents/Notes"]
 # Coding agent for hard tasks: codegem (pairs with gemma4), qwen (Qwen Code, pairs with
 # qwen3.8), deepseek (SuperQode's DeepSeek harness, pairs with MiniCPM), claude or codex.
 default = "codegem"
+# When Claude Code (or Codex) is installed, it plans coding tasks for the local harness and
+# reviews its changes; the harness then fixes what the review finds. "off" to disable.
+advisor = "auto"
 
 [agent_mail]
 # account = "my-assistant@gmail.com"   # must be in GNOME Settings → Online Accounts

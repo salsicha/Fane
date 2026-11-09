@@ -84,7 +84,9 @@ pub fn builtin_tools(h: Handlers, delegate_agents: &[(String, String)]) -> Vec<T
             "delegate",
             &format!(
                 "Hand a difficult task (coding, debugging, multi-step research) to a coding agent. \
-                 Available: {}. Use {} unless the user asks for another. Returns its final output.",
+                 Available: {}. Use {} unless the user asks for another. When Claude Code or Codex is \
+                 installed, it plans the work for a local agent and reviews the result automatically. \
+                 Returns the final output.",
                 listing.join("; "),
                 names[0]
             ),

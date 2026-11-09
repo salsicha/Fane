@@ -54,6 +54,9 @@ pub struct HarnessRecord {
     /// The reply names the fix (session uid), for harnesses that only answer.
     pub explained: bool,
     pub latency_s: f64,
+    /// The frontier model that planned and reviewed, if `--advisor` was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advisor: Option<String>,
     pub output: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -117,7 +120,14 @@ pub async fn score(dir: &Path, output: &str, record: &mut HarnessRecord) {
 }
 
 /// Run `harness` on `model` (an installed Ollama tag) against a fresh copy of the project.
-pub async fn run_task(cfg: &Config, harness: &str, model: &str, host: &str, timeout: Duration) -> HarnessRecord {
+pub async fn run_task(
+    cfg: &Config,
+    harness: &str,
+    model: &str,
+    host: &str,
+    timeout: Duration,
+    with_advisor: bool,
+) -> HarnessRecord {
     let mut record = HarnessRecord { harness: harness.into(), model: model.into(), ..Default::default() };
     let mut dcfg = eval_cfg(cfg);
     dcfg.timeout = timeout.as_secs().max(1);
@@ -135,7 +145,15 @@ pub async fn run_task(cfg: &Config, harness: &str, model: &str, host: &str, time
     }
     let vars = Vars { model: model.into(), ollama_host: host.into() };
     let t0 = Instant::now();
-    let output = delegate.run(harness, TASK, &dir.display().to_string(), &vars).await;
+    let cwd = dir.display().to_string();
+    let output = match crate::connectors::review::advisor(&delegate.cfg).filter(|_| with_advisor) {
+        Some(adv) => {
+            record.advisor = Some(adv.0.clone());
+            let progress = |s: &str| println!("    {s}");
+            delegate.run_with_advisor(Some(adv), harness, TASK, &cwd, &vars, &progress).await
+        }
+        None => delegate.run(harness, TASK, &cwd, &vars).await,
+    };
     record.latency_s = (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0;
     if output.starts_with("error:") {
         record.error = Some(crate::llm::truncate(&output, 300).to_string());

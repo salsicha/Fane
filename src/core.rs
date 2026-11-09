@@ -110,6 +110,8 @@ pub struct Core {
     /// Run setup without asking (`fane run --setup`, used by the Windows installer).
     pub auto_setup: AtomicBool,
     setup_running: AtomicBool,
+    /// The job whose agent is running, for tools that report progress (delegation).
+    current_job: Mutex<Option<u64>>,
     me: Weak<Core>,
 }
 
@@ -157,6 +159,7 @@ impl Core {
             rt: tokio::runtime::Handle::current(),
             auto_setup: AtomicBool::new(false),
             setup_running: AtomicBool::new(false),
+            current_job: Mutex::new(None),
             me: me.clone(),
         })
     }
@@ -234,6 +237,13 @@ impl Core {
         }
     }
 
+    /// A status line for the running job's card (no-op outside a job, e.g. emailed requests).
+    pub fn job_status(&self, text: &str) {
+        if let Some(job) = *self.current_job.lock().unwrap() {
+            self.ui(UiEvent::JobStatus(job, text.to_string()));
+        }
+    }
+
     // --- first-run setup -------------------------------------------------------------
     /// Install/start Ollama and download the model in the background, with a progress card.
     pub fn run_setup(self: &Arc<Self>) {
@@ -288,7 +298,7 @@ impl Core {
         let mail = Arc::new(ThunderbirdMail::new(&c.connectors.thunderbird_profiles));
         let me = self.me.clone();
         let core = move || me.upgrade().ok_or_else(|| anyhow::anyhow!("Fane is shutting down"));
-        let (c1, c2, c3, c4) = (core.clone(), core.clone(), core.clone(), core.clone());
+        let (c1, c2, c3, c4, c5) = (core.clone(), core.clone(), core.clone(), core.clone(), core.clone());
         let n1 = notes.clone();
         let delegate = self.delegate.clone();
         let llm = Arc::downgrade(&self.llm);
@@ -327,9 +337,13 @@ impl Core {
             delegate: handler(move |a: Args| {
                 let delegate = delegate.clone();
                 let vars = llm.upgrade().map(|l| Vars { model: l.model(), ollama_host: l.host() }).unwrap_or_default();
+                let core = c5();
                 async move {
                     let agent = a.str("agent");
-                    Ok(json!(delegate.run(&agent, &a.require("task")?, &a.str("cwd"), &vars).await))
+                    let core = core?;
+                    // Planning and review by Claude/Codex show up on the job's progress card.
+                    let progress = |s: &str| core.job_status(s);
+                    Ok(json!(delegate.run_reviewed(&agent, &a.require("task")?, &a.str("cwd"), &vars, &progress).await))
                 }
             }),
         };
@@ -522,10 +536,12 @@ impl Core {
             let agent = me.agent(me.tools.read().unwrap().clone());
             let ui = me.clone();
             let status = move |s: &str| ui.ui(UiEvent::JobStatus(job, s.to_string()));
+            *me.current_job.lock().unwrap() = Some(job);
             let ev = match agent.run(&prompt, &snap, &history, &status).await {
                 Ok(r) => UiEvent::JobDone { job, result: Some(r), error: None },
                 Err(e) => UiEvent::JobDone { job, result: None, error: Some(e.to_string()) },
             };
+            *me.current_job.lock().unwrap() = None;
             me.agent_running.store(false, Ordering::SeqCst);
             me.ui(ev);
         });
