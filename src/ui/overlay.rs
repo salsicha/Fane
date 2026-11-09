@@ -239,28 +239,35 @@ impl Overlay {
         let mut actions = vec![];
         ui.set_opacity(self.opacity());
         let mut close = false;
-        let mut buttons: Vec<(&str, bool, u8)> = vec![];
+        let mut buttons: Vec<(String, bool, u8)> = vec![];
         let (meta, title, body, markdown, max_h) = match &self.card {
             None => return actions,
             Some(Card::Suggestion(s)) => {
-                buttons = vec![("Edit", false, 1), ("Run", true, 2)];
+                buttons = vec![("Edit".into(), false, 1), ("Run".into(), true, 2)];
                 (short_app(&s.window), s.title.clone(), s.prompt.clone(), false, 64.0)
             }
             Some(Card::Working { title, status, .. }) => (String::new(), title.clone(), status.clone(), false, 40.0),
             Some(Card::Result { title, text, error, .. }) => {
                 if !error {
-                    buttons = vec![("Open", false, 3), ("Copy", false, 4), ("Insert", true, 5)];
+                    buttons = vec![("Open".into(), false, 3), ("Copy".into(), false, 4), ("Insert".into(), true, 5)];
                 }
                 let t = if *error { "Couldn't do that".to_string() } else { title.clone() };
                 (String::new(), t, text.clone(), !*error, 240.0)
             }
             Some(Card::Toast(text)) => (String::new(), text.clone(), String::new(), false, 0.0),
             Some(Card::Offer(text)) => {
-                buttons = vec![("Not now", false, 8), ("Set up", true, 9)];
+                buttons = vec![("Not now".into(), false, 8), ("Set up".into(), true, 9)];
                 ("· setup".into(), "Set up Fane?".into(), format!("{text}. Fane needs these to work."), false, 80.0)
             }
+            Some(Card::Confirm { details, .. }) if details.get("title").is_some() => {
+                // Generic confirmation (file changes, ...): title, meta, text, ok label.
+                let s = |k: &str| details[k].as_str().unwrap_or("").to_string();
+                let ok = if s("ok").is_empty() { "OK".to_string() } else { s("ok") };
+                buttons = vec![("Cancel".into(), false, 6), (ok, true, 7)];
+                (s("meta"), s("title"), s("text"), false, 220.0)
+            }
             Some(Card::Confirm { details, .. }) => {
-                buttons = vec![("Cancel", false, 6), ("Send", true, 7)];
+                buttons = vec![("Cancel".into(), false, 6), ("Send".into(), true, 7)];
                 let list = |k: &str| {
                     details[k]
                         .as_array()

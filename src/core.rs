@@ -237,6 +237,13 @@ impl Core {
         }
     }
 
+    /// Ask the user on a Send/Cancel-style card; unanswered (3 minutes) = no.
+    pub async fn confirm(&self, details: Value) -> bool {
+        let (tx, rx) = oneshot::channel();
+        self.ui(UiEvent::ConfirmSend(details, tx));
+        matches!(tokio::time::timeout(Duration::from_secs(200), rx).await, Ok(Ok(true)))
+    }
+
     /// A status line for the running job's card (no-op outside a job, e.g. emailed requests).
     pub fn job_status(&self, text: &str) {
         if let Some(job) = *self.current_job.lock().unwrap() {
@@ -352,6 +359,43 @@ impl Core {
         for tool in builtin_tools(h, &available) {
             reg.add(tool);
         }
+        drop(reg);
+        self.register_file_tools();
+    }
+
+    /// (Re)build the filesystem tools from `[files]`; changes are confirmed on a card.
+    fn register_file_tools(&self) {
+        let me = self.me.clone();
+        let confirm: crate::connectors::files::Confirm = Arc::new(move |details| {
+            let me = me.clone();
+            Box::pin(async move {
+                match me.upgrade() {
+                    Some(core) => core.confirm(details).await,
+                    None => false,
+                }
+            })
+        });
+        let files = Arc::new(crate::connectors::files::Files::new(&self.cfg().files, confirm));
+        let mut reg = self.tools.write().unwrap();
+        for tool in files.tools() {
+            reg.add(tool);
+        }
+    }
+
+    /// Save the folders the file tools may use (from Settings) and apply them now.
+    pub fn set_file_roots(&self, roots: Vec<String>) -> Result<String, String> {
+        let roots: Vec<String> = roots.into_iter().map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
+        if let Some(bad) = roots.iter().find(|r| !crate::config::expand(r).is_dir()) {
+            return Err(format!("{bad} isn't a folder"));
+        }
+        set_value("files", "roots", crate::config::str_array(&roots)).map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().files.roots = roots.clone();
+        self.register_file_tools();
+        Ok(if roots.is_empty() {
+            "Fane can't use any files now".into()
+        } else {
+            format!("Fane can use files in {}", roots.join(", "))
+        })
     }
 
     // --- clipboard and pasting -------------------------------------------------------
@@ -551,7 +595,10 @@ impl Core {
     /// An emailed request from the owner: reduced tools, screen only if allowed.
     pub async fn run_remote(&self, prompt: &str) -> String {
         let cfg = self.cfg().agent_mail;
-        let tools = self.tools.read().unwrap().without(&cfg.remote_exclude_tools);
+        // Nobody is at the desk to confirm file changes, whatever the config says.
+        let mut exclude = cfg.remote_exclude_tools.clone();
+        exclude.extend(crate::connectors::files::WRITE_TOOLS.map(String::from));
+        let tools = self.tools.read().unwrap().without(&exclude);
         let snap = if cfg.remote_can_see_screen {
             self.snapshot(true).await
         } else {
@@ -784,11 +831,10 @@ impl MailHost for MailBridge {
     }
 
     async fn confirm_send(&self, details: Value) -> bool {
-        let Some(core) = self.0.upgrade() else { return false };
-        let (tx, rx) = oneshot::channel();
-        core.ui(UiEvent::ConfirmSend(details, tx));
-        // The card times out after 3 minutes; unanswered = not sent.
-        matches!(tokio::time::timeout(Duration::from_secs(200), rx).await, Ok(Ok(true)))
+        match self.0.upgrade() {
+            Some(core) => core.confirm(details).await,
+            None => false,
+        }
     }
 }
 

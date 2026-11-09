@@ -14,8 +14,10 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
   leaves your network unless you delegate a task.
 - **Inserts at your cursor.** Drafts, replies and rewrites are pasted where you're already
   typing. Images work too.
+- **Works with your files.** It can find, search and read files in the folders you allow,
+  and create, edit, move or trash them after you confirm each change.
 - **Talks to your apps.** It reads your notes folders and Thunderbird mail directly, and any
-  app that has an MCP server (Gmail, calendars, Slack, Obsidian, the filesystem and so on).
+  app that has an MCP server (Gmail, calendars, Slack, Obsidian and so on).
 - **Has its own email** (Linux). Give it a Gmail account through GNOME Online Accounts. You
   can email it tasks from your own address, and it replies. Mail from anyone else is ignored.
 - **Delegates the hard stuff.** Coding and long multi-step tasks go to a command-line coding
@@ -115,11 +117,38 @@ in ~/code/api"* (which gets delegated to a [coding agent](#coding-agents)).
 **Settings…** in the tray menu covers the things you'd change most:
 
 - **Ollama server**: pick the server Fane uses (see below).
+- **Files**: the folders Fane may use (see [Files](#files)).
 - **Your email**: your personal address. Only mail from it is read, acted on and answered.
 - **Fane's own Gmail account** (Linux): which Online Accounts mailbox Fane uses, or off.
 
 Everything else lives in the config file (**Edit config file…**, see
 [Configuration](#configuration)).
+
+## Files
+
+Fane has built-in tools for the folders you allow (`[files] roots`, your home folder by
+default; change it in **Settings… → Files**):
+
+| Tool | What it does | Asks first |
+| --- | --- | --- |
+| `list_files` | A folder's files and subfolders, with sizes and dates | no |
+| `find_files` | Files by name or wildcard (`*.pdf`, `report*`), newest first | no |
+| `search_files` | Lines containing some text, across text files | no |
+| `read_file` | A text file's contents (long files a page at a time) | no |
+| `write_file` | Create a file, replace it, or add to the end | yes |
+| `edit_file` | Replace one exact passage in a file | yes |
+| `move_file` | Move or rename a file or folder | yes |
+| `delete_file` | Move a file or folder to the system trash | yes |
+
+Changes show a card with the path and a preview (or the lines being replaced); nothing
+happens unless you click, and an unanswered card cancels after 3 minutes. Hidden files and
+folders (`.ssh`, `.config`, browser profiles, ...) and secret-looking files (`*.kdbx`,
+`id_rsa*`, `*.pem`, `*password*`, ... see `[files] blocked`) are never opened, symlinks can't
+lead outside the allowed folders, and searches skip `node_modules`, `target` and similar.
+Requests emailed to Fane can read files but never change them.
+
+These are built into Fane rather than provided by an MCP server so that they follow its
+confirmation and privacy rules on every OS without needing Node.js.
 
 ## Using Ollama on another computer
 
@@ -304,7 +333,7 @@ fane eval --list               # show the cases
 | Screen understanding | The `activity` sentence names what's on screen: an email, a failing test, a Slack request, a spreadsheet error, an article, photos or an empty desktop. |
 | Helpful suggestions | A confident and *specific* suggestion appears where one is clearly useful, such as "reply to Dana" or "fix the KeyError". |
 | Staying quiet | No confident suggestion appears on an idle desktop or while browsing photos. |
-| Agent tasks | Seven tasks scored on the tool trace: replying at the cursor without preamble, looking up email, opening and summarizing a note, reading an error off the screen, delegating a code fix, rewriting the clipboard, and answering from an MCP calendar tool. Unnecessary actions are penalized, such as delegating or inserting when the user only asked a question. |
+| Agent tasks | Eight tasks scored on the tool trace: replying at the cursor without preamble, looking up email, opening and summarizing a note, reading an error off the screen, delegating a code fix, rewriting the clipboard, finding a figure in the right file with the file tools, and answering from an MCP calendar tool. Unnecessary actions are penalized, such as delegating or inserting when the user only asked a question. |
 | Speed and fit | Median latency for suggestions and for agent tasks, tokens per second, tool calls and tokens per task, hidden reasoning (some models think even when asked not to, which is where the latency goes), how much of the model is on the GPU, and cold load time. |
 
 `fane eval --harness --advisor` runs that task with Claude (or Codex) planning and reviewing,
@@ -348,6 +377,9 @@ binding = "<Control><Super>space" # Linux (GNOME syntax); e.g. "Cmd+Shift+Space"
 
 [connectors]
 notes_dirs = ["~/Notes", "~/Obsidian"]
+
+[files]
+roots = ["~"]                    # folders the file tools may use
 
 [delegate]
 default = "codegem"              # or qwen, deepseek, claude, codex (see Coding agents)

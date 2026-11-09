@@ -1129,9 +1129,9 @@ mod tests {
     #[test]
     fn list_has_all_cases() {
         let lines = list_cases();
-        assert_eq!(lines.len(), 14);
+        assert_eq!(lines.len(), 15);
         assert_eq!(lines.iter().filter(|l| l.starts_with("suggest  ")).count(), 7);
-        assert_eq!(lines.iter().filter(|l| l.starts_with("agent    ")).count(), 7);
+        assert_eq!(lines.iter().filter(|l| l.starts_with("agent    ")).count(), 8);
         assert_eq!(lines[0], "suggest  email              expect: suggest");
         assert_eq!(lines[6], "suggest  article            expect: not scored");
         assert_eq!(lines[7], "agent    reply_insert       Reply to Dana saying Thursday at 3pm works for me.");

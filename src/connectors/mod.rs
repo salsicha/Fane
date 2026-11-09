@@ -2,6 +2,7 @@
 
 pub mod builtin;
 pub mod delegate;
+pub mod files;
 pub mod mcp;
 pub mod notes;
 pub mod review;

@@ -62,6 +62,7 @@ pub struct Config {
     pub insert: InsertCfg,
     pub connectors: ConnectorsCfg,
     pub delegate: DelegateCfg,
+    pub files: FilesCfg,
     pub agent_mail: AgentMailCfg,
     pub mcp: McpCfg,
 }
@@ -390,6 +391,48 @@ impl Default for DelegateCfg {
     }
 }
 
+/// The local filesystem tools (list, find, search, read; and, after the user confirms, write,
+/// edit, move and move-to-trash).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesCfg {
+    /// Folders Fane may use. Hidden files and folders inside them (`.ssh`, `.config`, browser
+    /// profiles, ...) are always off-limits.
+    pub roots: Vec<String>,
+    /// File names Fane never opens, even inside the roots (wildcards).
+    pub blocked: Vec<String>,
+    /// Most characters `read_file` returns at once (it pages through longer files).
+    pub max_read_chars: usize,
+}
+
+impl Default for FilesCfg {
+    fn default() -> Self {
+        Self {
+            roots: vec!["~".into()],
+            blocked: [
+                "*.kdbx",
+                "*.kdb",
+                "*.keychain*",
+                "id_rsa*",
+                "id_ed25519*",
+                "id_ecdsa*",
+                "id_dsa*",
+                "*.pem",
+                "*.key",
+                "*.p12",
+                "*.pfx",
+                "*.gpg",
+                "*.asc",
+                "credentials*",
+                "*password*",
+            ]
+            .map(String::from)
+            .to_vec(),
+            max_read_chars: 30_000,
+        }
+    }
+}
+
 /// Fane's own email: a Google account from GNOME Settings → Online Accounts (Linux only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -429,9 +472,19 @@ impl Default for AgentMailCfg {
             trusted_senders: vec![],
             max_auto_replies_per_hour: 20,
             remote_can_see_screen: false,
-            remote_exclude_tools: ["insert_text", "insert_image", "delegate", "fane_send_email", "fane_reply_email"]
-                .map(String::from)
-                .to_vec(),
+            remote_exclude_tools: [
+                "insert_text",
+                "insert_image",
+                "delegate",
+                "fane_send_email",
+                "fane_reply_email",
+                "write_file",
+                "edit_file",
+                "move_file",
+                "delete_file",
+            ]
+            .map(String::from)
+            .to_vec(),
             signature: "— Fane (assistant)".into(),
         }
     }
@@ -481,6 +534,10 @@ binding = "{binding}"
 
 [connectors]
 notes_dirs = ["~/Notes", "~/Documents/Notes"]
+
+[files]
+# Folders Fane may read and (after you confirm each change) edit. Hidden files are off-limits.
+roots = ["~"]
 
 [delegate]
 # Coding agent for hard tasks: codegem (pairs with gemma4), qwen (Qwen Code, pairs with
@@ -556,7 +613,6 @@ pub fn set_value_in(path: &Path, section: &str, key: &str, value: impl Into<toml
 }
 
 /// A string list as a TOML array value.
-#[cfg(test)]
 pub fn str_array(items: &[String]) -> toml_edit::Value {
     let mut a = toml_edit::Array::new();
     for s in items {

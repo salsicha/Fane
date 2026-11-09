@@ -457,6 +457,11 @@ impl App {
                 }
             }
             SettingsAction::Setup => self.core.run_setup(),
+            SettingsAction::SaveFileRoots(roots) => {
+                let r = self.core.set_file_roots(roots);
+                self.settings.roots_saved(r);
+                self.redraw(WindowKind::Settings);
+            }
             SettingsAction::Close => self.set_visible(WindowKind::Settings, false),
         }
     }

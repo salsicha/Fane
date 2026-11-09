@@ -16,6 +16,7 @@ pub enum SettingsAction {
     ManageAccounts,
     /// Install Ollama / download the model if missing.
     Setup,
+    SaveFileRoots(Vec<String>),
     EditConfig,
     Close,
 }
@@ -31,6 +32,8 @@ pub struct Settings {
     accounts: Option<Result<Vec<GoaAccount>, String>>,
     owner: String,
     mail_status: String,
+    roots: String,
+    roots_status: String,
 }
 
 impl Settings {
@@ -38,6 +41,7 @@ impl Settings {
         Self {
             address: cfg.model.host.clone(),
             owner: cfg.agent_mail.owner().unwrap_or_default(),
+            roots: cfg_roots(&cfg),
             cfg,
             servers: vec![],
             selected: None,
@@ -46,6 +50,7 @@ impl Settings {
             server_status: String::new(),
             accounts: None,
             mail_status: String::new(),
+            roots_status: String::new(),
         }
     }
 
@@ -53,6 +58,8 @@ impl Settings {
     pub fn open(&mut self, cfg: Config) -> Vec<SettingsAction> {
         self.address = cfg.model.host.clone();
         self.owner = cfg.agent_mail.owner().unwrap_or_default();
+        self.roots = cfg_roots(&cfg);
+        self.roots_status.clear();
         self.cfg = cfg;
         self.mail_status.clear();
         let mut actions = vec![];
@@ -99,6 +106,13 @@ impl Settings {
 
     pub fn show_accounts(&mut self, accounts: Result<Vec<GoaAccount>, String>) {
         self.accounts = Some(accounts);
+    }
+
+    pub fn roots_saved(&mut self, result: Result<String, String>) {
+        self.roots_status = match result {
+            Ok(m) => format!("✓ {m}."),
+            Err(e) => format!("✗ {e}"),
+        };
     }
 
     pub fn mail_saved(&mut self, result: Result<String, String>, cfg: Config) {
@@ -206,6 +220,18 @@ impl Settings {
                     .color(dim)
                     .small(),
             );
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.heading("Files");
+            ui.label("Folders Fane may use, one per line. It reads files there freely and asks you before changing, moving or deleting anything (deleted files go to the trash). Hidden files and secrets like .ssh are always off-limits.");
+            ui.add(egui::TextEdit::multiline(&mut self.roots).desired_rows(3).desired_width(f32::INFINITY).hint_text("~/Documents"));
+            ui.horizontal(|ui| {
+                if ui.button("Save folders").clicked() {
+                    actions.push(SettingsAction::SaveFileRoots(self.roots.lines().map(String::from).collect()));
+                }
+                ui.label(&self.roots_status);
+            });
 
             ui.add_space(12.0);
             ui.separator();
@@ -317,4 +343,8 @@ impl Settings {
             ui.label(&self.mail_status);
         }
     }
+}
+
+fn cfg_roots(cfg: &Config) -> String {
+    cfg.files.roots.join("\n")
 }
