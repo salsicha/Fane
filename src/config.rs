@@ -337,8 +337,25 @@ pub fn builtin_agents() -> Vec<(&'static str, AgentCfg)> {
                 "SuperQode's DeepSeek (ds4-coding) harness, a coding agent running on the local model",
             ),
         ),
-        ("claude", agent(&["claude", "-p", "{task}"], &[], "Claude Code (the user's Claude subscription)")),
-        ("codex", agent(&["codex", "exec", "--skip-git-repo-check", "{task}"], &[], "Codex (the user's ChatGPT plan)")),
+        // Each one's own auto-approve mode: Claude Code's classifier approves safe actions and
+        // blocks risky ones; Codex routes approvals through its automatic review, sandboxed to
+        // the workspace.
+        (
+            "claude",
+            agent(
+                &["claude", "-p", "--permission-mode", "auto", "{task}"],
+                &[],
+                "Claude Code (the user's Claude subscription)",
+            ),
+        ),
+        (
+            "codex",
+            agent(
+                &["codex", "exec", "--skip-git-repo-check", "--approve-for-me", "{task}"],
+                &[],
+                "Codex (the user's ChatGPT plan)",
+            ),
+        ),
     ]
 }
 

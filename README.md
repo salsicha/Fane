@@ -263,8 +263,8 @@ model every harness that's installed, with `[delegate] default` first:
 | `codegem` (default) | `uv tool install superqode` | `superqode harness run codegem "<task>" --provider ollama --model <model> --working-dir <dir>` |
 | `qwen` | `npm install -g @qwen-code/qwen-code` ([Qwen Code](https://github.com/QwenLM/qwen-code)) | `qwen --auth-type openai --openai-base-url <ollama>/v1 --openai-api-key ollama -m <model> "<task>"` |
 | `deepseek` | `uv tool install superqode` (same package as CodeGem) | `superqode harness run ds4-coding "<task>" --provider ollama --model <model> --working-dir <dir>` |
-| `claude` | [Claude Code](https://claude.com/claude-code) | `claude -p "<task>"` |
-| `codex` | [Codex](https://github.com/openai/codex) | `codex exec "<task>"` |
+| `claude` | [Claude Code](https://claude.com/claude-code) | `claude -p --permission-mode auto "<task>"` |
+| `codex` | [Codex](https://github.com/openai/codex) | `codex exec --skip-git-repo-check --approve-for-me "<task>"` |
 
 The three local harnesses run on the same Ollama model and server as Fane (including a
 server you picked in Settings), so nothing leaves your network and the model doesn't have to
@@ -455,9 +455,12 @@ pasting and the global hotkey.
   HTTP, and Ollama itself has no login, so anyone who can reach the port can use it. Only
   do this on a network you trust, or put the server behind a VPN like Tailscale (type its
   address by hand; the scan only covers your local subnets).
-- Coding agents run non-interactively with their default permission settings, in
-  `[delegate] cwd`. To give one more autonomy (e.g. Qwen Code's `--approval-mode auto-edit`),
-  change its command under `[delegate.agents.<name>]`.
+- Coding agents run non-interactively in `[delegate] cwd`, so nobody is there to approve
+  their actions. Claude Code runs in its auto mode (its classifier approves safe actions and
+  blocks risky ones) and Codex with `--approve-for-me` (automatic review, sandboxed to the
+  workspace), so both can edit files and run commands on their own; the local harnesses use
+  their defaults. When Claude or Codex plans and reviews, it's read-only. Change any command
+  under `[delegate.agents.<name>]`.
 
 ## Development
 
