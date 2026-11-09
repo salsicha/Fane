@@ -77,6 +77,18 @@ enum Cmd {
         #[command(subcommand)]
         action: OllamaCmd,
     },
+    /// Update the index of your files now and show what's in it
+    Index {
+        /// Look something up in the index
+        #[arg(long)]
+        query: Option<String>,
+    },
+    /// List or forget your saved preferences
+    Prefs {
+        /// Forget the preference with this id
+        #[arg(long)]
+        forget: Option<i64>,
+    },
     /// Check what works on this machine
     Doctor {
         /// Also test screen capture
@@ -189,6 +201,8 @@ pub fn main() -> i32 {
         Cmd::Mail { action } => cmd_mail(action),
         Cmd::Ollama { action } => cmd_ollama(action),
         Cmd::Doctor { screenshot } => cmd_doctor(screenshot),
+        Cmd::Prefs { forget } => cmd_prefs(forget),
+        Cmd::Index { query } => cmd_index(query),
         Cmd::Eval(args) => cmd_eval(args),
         Cmd::RenderIcon { path, size } => crate::ui::icon::rgba(size).save(&path).map(|_| 0).map_err(Into::into),
     };
@@ -529,6 +543,13 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
             ),
             None => println!("  planning and review: off (install Claude Code or Codex, or set `[delegate] advisor`)"),
         }
+        if let Ok(store) = crate::store::Store::open(&STATE_DIR.join("fane.db")) {
+            let store = std::sync::Arc::new(store);
+            let index = crate::index::Index::new(store.clone(), crate::index::Scope::from_cfg(&cfg.files));
+            let n = index.file_count();
+            println!("{} index: {n} files, {} tools/agents", ok(index.ready()), index.capabilities().len());
+            println!("  preferences: {}", crate::prefs::Prefs::new(store).list().len());
+        }
         let mail = &cfg.agent_mail.account;
         println!(
             "{} Fane's email: {}",
@@ -554,6 +575,57 @@ fn cmd_doctor(screenshot: bool) -> anyhow::Result<i32> {
         );
         println!("  running: {}", if ipc::running() { "yes" } else { "no" });
     });
+    Ok(0)
+}
+
+fn cmd_index(query: Option<String>) -> anyhow::Result<i32> {
+    let cfg = Config::load()?;
+    let db = STATE_DIR.join("fane.db");
+    let store = std::sync::Arc::new(crate::store::Store::open(&db)?);
+    let index = crate::index::Index::new(store, crate::index::Scope::from_cfg(&cfg.files));
+    if let Some(q) = query {
+        for hit in index.search_files(&q, 20) {
+            let snippet = if hit.snippet.is_empty() { String::new() } else { format!("  — {}", hit.snippet) };
+            println!("{}  ({}){snippet}", hit.path, hit.modified);
+        }
+        return Ok(0);
+    }
+    println!("Indexing {}…", cfg.files.roots.join(", "));
+    let t0 = std::time::Instant::now();
+    let s = index.scan()?;
+    let size = std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0)
+        + std::fs::metadata(db.with_extension("db-wal")).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "{} files ({} new or changed, {} removed) in {:.1}s; index is {:.0} MB",
+        s.files,
+        s.added_or_changed,
+        s.removed,
+        t0.elapsed().as_secs_f64(),
+        size as f64 / 1e6
+    );
+    Ok(0)
+}
+
+fn cmd_prefs(forget: Option<i64>) -> anyhow::Result<i32> {
+    let store = std::sync::Arc::new(crate::store::Store::open(&STATE_DIR.join("fane.db"))?);
+    let prefs = crate::prefs::Prefs::new(store);
+    if let Some(id) = forget {
+        match prefs.forget(id) {
+            Some(p) => println!("Forgot: {}", p.text),
+            None => {
+                eprintln!("No preference [{id}].");
+                return Ok(1);
+            }
+        }
+        return Ok(0);
+    }
+    let all = prefs.list();
+    if all.is_empty() {
+        println!("No preferences yet. Tell Fane how you want something done (\"from now on…\").");
+    }
+    for p in all {
+        println!("{}", p.line());
+    }
     Ok(0)
 }
 

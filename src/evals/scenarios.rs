@@ -109,6 +109,32 @@ pub fn mock_agents() -> Vec<(String, String)> {
     .collect()
 }
 
+/// Unrelated MCP tools, as a user with several servers configured would have.
+const EXTRA_MCP_TOOLS: [(&str, &str, &str); 20] = [
+    ("jira", "create_issue", "Create a Jira issue"),
+    ("jira", "search_issues", "Search Jira issues"),
+    ("github", "list_pull_requests", "List pull requests in a repository"),
+    ("github", "create_issue", "Open a GitHub issue"),
+    ("github", "get_file", "Read a file from a GitHub repository"),
+    ("slack", "post_message", "Post a message to a Slack channel"),
+    ("slack", "search_messages", "Search Slack messages"),
+    ("notion", "search_pages", "Search Notion pages"),
+    ("notion", "create_page", "Create a Notion page"),
+    ("spotify", "play", "Play music on Spotify"),
+    ("spotify", "search", "Search Spotify for songs"),
+    ("drive", "search_files", "Search Google Drive files"),
+    ("drive", "upload", "Upload a file to Google Drive"),
+    ("linear", "create_issue", "Create a Linear issue"),
+    ("figma", "get_file", "Get a Figma design file"),
+    ("stripe", "list_payments", "List recent Stripe payments"),
+    ("todoist", "add_task", "Add a task to Todoist"),
+    ("todoist", "list_tasks", "List Todoist tasks"),
+    ("maps", "directions", "Driving or walking directions between two places"),
+    ("translate", "translate_text", "Translate text between languages"),
+];
+
+const WEATHER: &str = "Lisbon tomorrow: sunny, high 21°C, low 13°C, light wind.";
+
 /// One recorded call of the mock `delegate` tool.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Delegation {
@@ -124,6 +150,8 @@ pub struct Mocks {
     pub delegated: Arc<Mutex<Vec<Delegation>>>,
     /// File changes the model asked to make (all declined).
     pub file_changes: Arc<Mutex<Vec<Value>>>,
+    /// Preferences the model asked to save.
+    pub saved_prefs: Arc<Mutex<Vec<Value>>>,
 }
 
 /// A small, made-up home folder for the file tools: the same for every run.
@@ -170,6 +198,10 @@ impl Mocks {
 
     pub fn file_changes(&self) -> Vec<Value> {
         self.file_changes.lock().unwrap().clone()
+    }
+
+    pub fn saved_prefs(&self) -> Vec<Value> {
+        self.saved_prefs.lock().unwrap().clone()
     }
 
     pub fn registry(&self) -> ToolRegistry {
@@ -261,6 +293,56 @@ impl Mocks {
         for tool in Arc::new(crate::connectors::files::Files::new(&cfg, confirm)).tools() {
             reg.add(tool);
         }
+        // Preference tools (recording what the model saves).
+        let saved = self.saved_prefs.clone();
+        reg.add(Tool::new(
+            "save_preference",
+            "Remember how the user wants something done from now on (only their own instructions).",
+            params(
+                &["about", "preference"],
+                &[
+                    ("about", crate::tools::prop("string", "Short topic")),
+                    ("preference", crate::tools::prop("string", "The instruction")),
+                ],
+            ),
+            handler(move |a: Args| {
+                let saved = saved.clone();
+                async move {
+                    saved.lock().unwrap().push(Value::Object(a.0.clone()));
+                    Ok(json!("saved preference [9]"))
+                }
+            }),
+            "Remembering",
+        ));
+        reg.add(Tool::new(
+            "forget_preference",
+            "Forget one of the user's preferences by id (when they cancel it).",
+            params(&["id"], &[("id", crate::tools::prop("integer", ""))]),
+            handler(|_| async { Ok(json!("forgot preference")) }),
+            "Forgetting",
+        ));
+        // Many MCP servers' worth of tools, so tool selection and find_tools matter.
+        for (server, tool, desc) in EXTRA_MCP_TOOLS {
+            let name = format!("{server}__{tool}");
+            let out = format!("({name} result)");
+            reg.add(Tool::new(
+                &name,
+                &format!("[{server}] {desc}"),
+                params(&[], &[("query", crate::tools::prop("string", ""))]),
+                handler(move |_| {
+                    let out = out.clone();
+                    async move { Ok(json!(out)) }
+                }),
+                &format!("Asking {server}"),
+            ));
+        }
+        reg.add(Tool::new(
+            "weather__forecast",
+            "[weather] The weather forecast for a city and day.",
+            params(&["city"], &[("city", crate::tools::prop("string", "")), ("day", crate::tools::prop("string", ""))]),
+            handler(|_| async { Ok(json!(WEATHER)) }),
+            "Asking weather",
+        ));
         // Stands in for a tool coming from a calendar MCP server.
         reg.add(Tool::new(
             "calendar__todays_events",
@@ -321,6 +403,8 @@ pub struct AgentTask {
     pub prompt: &'static str,
     /// Named checks, in report order.
     pub checks: Vec<(&'static str, Check)>,
+    /// Standing preferences the user saved earlier: (topic, instruction).
+    pub preferences: &'static [(&'static str, &'static str)],
 }
 
 pub fn agent_tasks() -> Vec<AgentTask> {
@@ -334,6 +418,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                 ("mentions Thursday", inserted_has(&["thursday"])),
                 ("no preamble in inserted text", no_preamble()),
             ],
+            preferences: &[],
         },
         AgentTask {
             name: "email_lookup",
@@ -343,6 +428,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                 ("calls recent_emails", called("recent_emails")),
                 ("answer: design review / reschedule", answer_has(&["design review", "reschedul", "move", "push"])),
             ],
+            preferences: &[],
         },
         AgentTask {
             name: "notes_summary",
@@ -364,6 +450,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                     ),
                 ),
             ],
+            preferences: &[],
         },
         AgentTask {
             name: "screen_read",
@@ -377,6 +464,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                     check(|r, m| r.calls.len() <= 1 && m.delegated().is_empty() && m.inserted().is_empty()),
                 ),
             ],
+            preferences: &[],
         },
         AgentTask {
             name: "delegate_fix",
@@ -389,6 +477,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                     check(|_, m| m.delegated().iter().any(|d| FAILURE_TASK.is_match(&d.task))),
                 ),
             ],
+            preferences: &[],
         },
         AgentTask {
             name: "clipboard_rewrite",
@@ -403,6 +492,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                     check(|_, m| m.inserted().last().is_some_and(|t| !t.to_lowercase().contains("thx"))),
                 ),
             ],
+            preferences: &[],
         },
         AgentTask {
             name: "files_lookup",
@@ -419,6 +509,43 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                 ),
                 ("doesn't try to change files", check(|_, m| m.file_changes().is_empty())),
             ],
+            preferences: &[],
+        },
+        AgentTask {
+            name: "pref_followed",
+            scene: "email",
+            prompt: "Reply to Dana saying Thursday at 3pm works for me.",
+            checks: vec![
+                ("calls insert_text", called("insert_text")),
+                ("follows the saved sign-off", check(|_, m| m.inserted().iter().any(|t| t.contains("Best, Alex")))),
+            ],
+            preferences: &[("email sign-off", "Sign off my email replies with \"Best, Alex\".")],
+        },
+        AgentTask {
+            name: "pref_saved",
+            scene: "idle",
+            prompt: "From now on, keep my email replies under 50 words.",
+            checks: vec![
+                ("saves a preference", check(|_, m| !m.saved_prefs().is_empty())),
+                (
+                    "keeps the instruction",
+                    check(|_, m| {
+                        m.saved_prefs().iter().any(|p| p["preference"].as_str().is_some_and(|t| t.contains("50")))
+                    }),
+                ),
+                ("doesn't insert anything", check(|_, m| m.inserted().is_empty())),
+            ],
+            preferences: &[],
+        },
+        AgentTask {
+            name: "find_tool",
+            scene: "idle",
+            prompt: "What's the weather going to be in Lisbon tomorrow?",
+            checks: vec![
+                ("uses the weather tool", called("weather__forecast")),
+                ("answer: sunny / 21°C", answer_has(&["sunny", "21"])),
+            ],
+            preferences: &[],
         },
         AgentTask {
             name: "calendar_mcp",
@@ -429,6 +556,7 @@ pub fn agent_tasks() -> Vec<AgentTask> {
                 ("answer: busy (design review)", check(|r, _| BUSY.is_match(&r.text))),
                 ("doesn't insert or delegate", check(|_, m| m.inserted().is_empty() && m.delegated().is_empty())),
             ],
+            preferences: &[],
         },
     ]
 }

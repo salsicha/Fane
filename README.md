@@ -18,6 +18,10 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
   and create, edit, move or trash them after you confirm each change.
 - **Talks to your apps.** It reads your notes folders and Thunderbird mail directly, and any
   app that has an MCP server (Gmail, calendars, Slack, Obsidian and so on).
+- **Knows where things are.** It keeps an index of your files and of every tool it can use, so
+  finding a document or the right tool takes milliseconds.
+- **Remembers how you like things done.** Tell it once ("from now on, sign my emails *Best,
+  Alex*") and it follows that preference until you change it.
 - **Has its own email** (Linux). Give it a Gmail account through GNOME Online Accounts. You
   can email it tasks from your own address, and it replies. Mail from anyone else is ignored.
 - **Delegates the hard stuff.** Coding and long multi-step tasks go to a command-line coding
@@ -149,6 +153,44 @@ Requests emailed to Fane can read files but never change them.
 
 These are built into Fane rather than provided by an MCP server so that they follow its
 confirmation and privacy rules on every OS without needing Node.js.
+
+## Index and preferences
+
+**The index** knows where things are, so Fane doesn't have to search from scratch:
+
+- **Files**: the name and folder of every file in the allowed folders, and the text of
+  documents (Markdown, text, CSV, HTML, ...; code is left to the coding agents). `find_files`
+  and `search_files` use it. Hidden files, secrets, and tool installs and generated folders
+  (`anaconda3`, `node_modules`, `target`, ...) are left out. On the test machine, 421,000 files
+  were indexed in 21 seconds (178 MB), a re-check took 5 seconds, and a search about 0.04 s.
+- **Capabilities**: every tool Fane can use (built-in, MCP servers, Fane's email) and every
+  installed coding agent. `find_tools` answers "where can this be done?". With more than 24
+  tools, the model sees the core ones and those relevant to the request in full, and the rest
+  by name, which keeps the prompt small for a local model.
+
+The index is corrected when it stops being accurate: a re-check every 30 minutes re-indexes
+files whose size or date changed and drops deleted ones (and anything outside the allowed
+folders); a watcher catches changes as they happen where the OS allows; Fane's file tools
+update it when they change something; every search result is re-checked on disk before it's
+returned; and capabilities are replaced as soon as the set of tools changes. `fane index`
+updates it now (`--query` to look something up); **Settings → Rebuild index** does the same.
+
+**Preferences** are standing instructions you give about how something should be done:
+"reply to Dana formally", "save invoices to ~/Documents/Invoices", "use Qwen Code for Python".
+Fane saves one when you say "from now on…", "always…", "I prefer…" (a card confirms it), and
+follows the relevant ones in every request and in its suggestions. Only your own words are
+saved, never anything from emails, web pages or files. A preference is removed when it's no
+longer accurate:
+
+- a new preference on the same topic (or one you say changes it) replaces the old one;
+- one that refers to a folder that no longer exists, or a tool or coding agent that's no longer
+  configured, is dropped, and Fane tells you which and why (an MCP server that's configured but
+  not running right now doesn't count as gone);
+- you can forget one by asking, in **Settings → Preferences**, or with `fane prefs --forget ID`
+  (`fane prefs` lists them).
+
+Both live in a local SQLite database in Fane's state folder (`~/.local/state/fane/fane.db` on
+Linux) and never leave your machine.
 
 ## Using Ollama on another computer
 
@@ -333,7 +375,7 @@ fane eval --list               # show the cases
 | Screen understanding | The `activity` sentence names what's on screen: an email, a failing test, a Slack request, a spreadsheet error, an article, photos or an empty desktop. |
 | Helpful suggestions | A confident and *specific* suggestion appears where one is clearly useful, such as "reply to Dana" or "fix the KeyError". |
 | Staying quiet | No confident suggestion appears on an idle desktop or while browsing photos. |
-| Agent tasks | Eight tasks scored on the tool trace: replying at the cursor without preamble, looking up email, opening and summarizing a note, reading an error off the screen, delegating a code fix, rewriting the clipboard, finding a figure in the right file with the file tools, and answering from an MCP calendar tool. Unnecessary actions are penalized, such as delegating or inserting when the user only asked a question. |
+| Agent tasks | Eleven tasks scored on the tool trace, with 40 tools available (including 20 unrelated MCP tools, so tool selection matters): replying at the cursor without preamble, looking up email, opening and summarizing a note, reading an error off the screen, delegating a code fix, rewriting the clipboard, finding a figure in the right file, following a saved preference, saving a new preference, finding the right MCP tool for a question, and answering from an MCP calendar tool. Unnecessary actions are penalized, such as delegating or inserting when the user only asked a question. |
 | Speed and fit | Median latency for suggestions and for agent tasks, tokens per second, tool calls and tokens per task, hidden reasoning (some models think even when asked not to, which is where the latency goes), how much of the model is on the GPU, and cold load time. |
 
 `fane eval --harness --advisor` runs that task with Claude (or Codex) planning and reviewing,

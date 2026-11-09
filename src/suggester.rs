@@ -55,6 +55,10 @@ Do not repeat these recent suggestions: {recent}
     )
 }
 
+fn prompt_with(window: &str, history: &str, recent: &str, preferences: &str) -> String {
+    format!("{}{preferences}", prompt(window, history, recent))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Suggestion {
     pub id: u64,
@@ -88,6 +92,8 @@ pub struct Suggester {
     max_image_side: u32,
     pub history: Vec<String>,
     pub recent_titles: Vec<String>,
+    /// The user's standing preferences (a prompt section), e.g. what not to suggest.
+    pub preferences: String,
     last_snap: Option<Snapshot>,
     quiet_until: Option<Instant>,
     dismissals: u32,
@@ -102,6 +108,7 @@ impl Suggester {
             max_image_side,
             history: vec![],
             recent_titles: vec![],
+            preferences: String::new(),
             last_snap: None,
             quiet_until: None,
             dismissals: 0,
@@ -153,10 +160,11 @@ impl Suggester {
         let tail = |v: &[String], n: usize| v[v.len().saturating_sub(n)..].to_vec();
         let history = tail(&self.history, 4).join(" | ");
         let recent = tail(&self.recent_titles, 8).join("; ");
-        let text = prompt(
+        let text = prompt_with(
             &snap.window.label(),
             if history.is_empty() { "none" } else { &history },
             if recent.is_empty() { "none" } else { &recent },
+            &self.preferences,
         );
         let mut msg = json!({"role": "user", "content": text});
         if let Some(img) = &snap.image {

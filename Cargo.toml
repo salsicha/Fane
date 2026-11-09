@@ -33,12 +33,14 @@ imageproc = { version = "0.27.0", default-features = false, features = ["text"] 
 interprocess = { version = "2.4.7", features = ["tokio"] }
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder", "hostname"] }
 mail-parser = "1.0.1"
+notify = "8.2.2"
 open = "5.4.5"
 rand = "0.10.3"
 raw-window-handle = "0.6.2"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
 rmcp = { version = "3.9.0", features = ["client", "transport-child-process"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 rustls = "0.23.46"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

@@ -17,6 +17,8 @@ pub enum SettingsAction {
     /// Install Ollama / download the model if missing.
     Setup,
     SaveFileRoots(Vec<String>),
+    ForgetPref(i64),
+    RebuildIndex,
     EditConfig,
     Close,
 }
@@ -34,6 +36,8 @@ pub struct Settings {
     mail_status: String,
     roots: String,
     roots_status: String,
+    prefs: Vec<crate::prefs::Pref>,
+    index_status: String,
 }
 
 impl Settings {
@@ -51,6 +55,8 @@ impl Settings {
             accounts: None,
             mail_status: String::new(),
             roots_status: String::new(),
+            prefs: vec![],
+            index_status: String::new(),
         }
     }
 
@@ -106,6 +112,12 @@ impl Settings {
 
     pub fn show_accounts(&mut self, accounts: Result<Vec<GoaAccount>, String>) {
         self.accounts = Some(accounts);
+    }
+
+    /// What Fane remembers and has indexed (refreshed when the window opens or changes).
+    pub fn set_memory(&mut self, prefs: Vec<crate::prefs::Pref>, index_status: String) {
+        self.prefs = prefs;
+        self.index_status = index_status;
     }
 
     pub fn roots_saved(&mut self, result: Result<String, String>) {
@@ -232,6 +244,30 @@ impl Settings {
                 }
                 ui.label(&self.roots_status);
             });
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&self.index_status).color(dim).small());
+                if ui.small_button("Rebuild index").clicked() {
+                    actions.push(SettingsAction::RebuildIndex);
+                }
+            });
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.heading("Preferences");
+            ui.label("How you've asked Fane to do things. Tell Fane a new preference any time (“from now on…”); it replaces an older one on the same topic, and preferences that refer to a folder or tool that's gone are dropped.");
+            if self.prefs.is_empty() {
+                ui.label(RichText::new("None yet.").color(dim));
+            }
+            for p in &self.prefs {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Forget").clicked() {
+                        actions.push(SettingsAction::ForgetPref(p.id));
+                    }
+                    ui.label(RichText::new(&p.about).strong());
+                    ui.label(&p.text);
+                });
+            }
 
             ui.add_space(12.0);
             ui.separator();

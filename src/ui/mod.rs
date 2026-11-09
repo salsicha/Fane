@@ -402,6 +402,7 @@ impl App {
         }
         let first = !self.visible.contains(&WindowKind::Settings);
         let actions = self.settings.open(self.core.cfg());
+        self.settings.set_memory(self.core.prefs.list(), self.core.index_status());
         if first {
             self.place(event_loop, WindowKind::Settings);
         }
@@ -457,6 +458,14 @@ impl App {
                 }
             }
             SettingsAction::Setup => self.core.run_setup(),
+            SettingsAction::ForgetPref(id) => {
+                if let Some(p) = self.core.prefs.forget(id) {
+                    self.overlay.toast(&format!("Forgot: {}", p.text), 4);
+                }
+                self.settings.set_memory(self.core.prefs.list(), self.core.index_status());
+                self.redraw(WindowKind::Settings);
+            }
+            SettingsAction::RebuildIndex => self.core.rebuild_index(),
             SettingsAction::SaveFileRoots(roots) => {
                 let r = self.core.set_file_roots(roots);
                 self.settings.roots_saved(r);

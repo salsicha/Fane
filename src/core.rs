@@ -112,6 +112,11 @@ pub struct Core {
     setup_running: AtomicBool,
     /// The job whose agent is running, for tools that report progress (delegation).
     current_job: Mutex<Option<u64>>,
+    /// Where things are: files and capabilities.
+    pub index: Arc<crate::index::Index>,
+    /// The user's standing preferences.
+    pub prefs: Arc<crate::prefs::Prefs>,
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
     me: Weak<Core>,
 }
 
@@ -130,6 +135,13 @@ impl Core {
             Arc::new(Ollama::new(&m))
         };
         let desktop = Desktop::connect().await;
+        let db = crate::config::STATE_DIR.join("fane.db");
+        let store = Arc::new(crate::store::Store::open(&db).unwrap_or_else(|e| {
+            tracing::error!("{e:#}; keeping the index and preferences in memory this session");
+            crate::store::Store::in_memory().expect("in-memory database")
+        }));
+        let index = Arc::new(crate::index::Index::new(store.clone(), crate::index::Scope::from_cfg(&cfg.files)));
+        let prefs = Arc::new(crate::prefs::Prefs::new(store));
         Arc::new_cyclic(|me| Core {
             suggester: tokio::sync::Mutex::new(Suggester::new(
                 suggest_llm.clone(),
@@ -160,6 +172,9 @@ impl Core {
             auto_setup: AtomicBool::new(false),
             setup_running: AtomicBool::new(false),
             current_job: Mutex::new(None),
+            index,
+            prefs,
+            watcher: Mutex::new(None),
             me: me.clone(),
         })
     }
@@ -213,7 +228,10 @@ impl Core {
             self.notify(format!("MCP server {name} failed: {e}"));
         }
         self.setup_mail().await;
+        self.refresh_capabilities();
         self.ready.store(true, Ordering::SeqCst);
+        let me = self.clone();
+        self.rt.spawn(async move { me.index_loop().await });
         let me = self.clone();
         self.rt.spawn(async move { me.suggest_loop().await });
     }
@@ -361,6 +379,7 @@ impl Core {
         }
         drop(reg);
         self.register_file_tools();
+        self.register_memory_tools();
     }
 
     /// (Re)build the filesystem tools from `[files]`; changes are confirmed on a card.
@@ -375,11 +394,193 @@ impl Core {
                 }
             })
         });
-        let files = Arc::new(crate::connectors::files::Files::new(&self.cfg().files, confirm));
+        let files =
+            Arc::new(crate::connectors::files::Files::new(&self.cfg().files, confirm).with_index(self.index.clone()));
         let mut reg = self.tools.write().unwrap();
         for tool in files.tools() {
             reg.add(tool);
         }
+    }
+
+    // --- index and preferences -----------------------------------------------------------
+    /// Keep the index current: a full (incremental) scan now and every 30 minutes, a watcher
+    /// for live changes, and preference clean-up after each pass.
+    async fn index_loop(self: Arc<Self>) {
+        loop {
+            let index = self.index.clone();
+            match tokio::task::spawn_blocking(move || index.scan()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("indexing failed: {e:#}"),
+                Err(e) => tracing::warn!("indexing crashed: {e}"),
+            }
+            if self.watcher.lock().unwrap().is_none() {
+                *self.watcher.lock().unwrap() = crate::index::watch(self.index.clone(), self.rt.clone());
+            }
+            self.refresh_capabilities();
+            tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+        }
+    }
+
+    /// What Fane can use right now, for the capability index.
+    fn capabilities(&self) -> Vec<crate::index::Capability> {
+        use crate::index::Capability;
+        let cfg = self.cfg();
+        let mail = mail_tool_names();
+        let mut caps: Vec<Capability> = self
+            .tools
+            .read()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let source = match t.name.split_once("__") {
+                    Some((server, _)) => format!("MCP server {server}"),
+                    None if mail.contains(&t.name.as_str()) => format!("Fane's email ({})", cfg.agent_mail.account),
+                    None if crate::connectors::files::WRITE_TOOLS.contains(&t.name.as_str())
+                        || ["list_files", "find_files", "search_files", "read_file"].contains(&t.name.as_str()) =>
+                    {
+                        "files".to_string()
+                    }
+                    None => "built-in".to_string(),
+                };
+                Capability { kind: "tool".into(), name: t.name.clone(), source, description: t.description.clone() }
+            })
+            .collect();
+        for (name, description) in self.delegate.available() {
+            caps.push(Capability {
+                kind: "agent".into(),
+                name,
+                source: "coding agent (use the delegate tool)".into(),
+                description,
+            });
+        }
+        caps
+    }
+
+    /// Re-sync the capability index with the current tools, then drop preferences that depend on
+    /// something no longer configured.
+    pub fn refresh_capabilities(&self) {
+        if self.index.sync_capabilities(&self.capabilities()) {
+            self.invalidate_prefs();
+        }
+    }
+
+    /// Whether a tool or agent named in a preference still exists. An MCP server that's still
+    /// configured but not running right now doesn't count as gone.
+    fn still_configured(&self, name: &str) -> bool {
+        if self.tools.read().unwrap().contains(name) || self.delegate.available().iter().any(|(n, _)| n == name) {
+            return true;
+        }
+        let cfg = self.cfg();
+        if let Some((server, _)) = name.split_once("__") {
+            let safe = |s: &str| {
+                s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect::<String>()
+            };
+            return cfg.mcp.servers.keys().any(|k| safe(k) == server);
+        }
+        mail_tool_names().contains(&name) && !cfg.agent_mail.account.is_empty()
+    }
+
+    fn invalidate_prefs(&self) {
+        for (pref, reason) in self.prefs.invalidate(&|t| self.still_configured(t)) {
+            tracing::info!("forgot preference {} ({reason})", pref.line());
+            self.notify(format!("Forgot your preference “{}”: {reason}.", pref.text));
+        }
+    }
+
+    /// Names a preference might refer to (for detecting what it depends on).
+    fn known_names(&self) -> Vec<String> {
+        let mut names = self.tools.read().unwrap().names();
+        names.extend(self.cfg().delegate.all_agents().into_iter().map(|(n, _)| n));
+        names
+    }
+
+    fn register_memory_tools(&self) {
+        use crate::tools::{Tool, params, prop};
+        let mut reg = self.tools.write().unwrap();
+        let index = self.index.clone();
+        reg.add(Tool::new(
+            "find_tools",
+            "Find which tool, MCP server or coding agent can do a task (e.g. \"calendar\", \"send a Slack message\").",
+            params(&["task"], &[("task", prop("string", "What you want to get done"))]),
+            handler(move |a: Args| {
+                let index = index.clone();
+                async move { Ok(index.find_capabilities_json(&a.require("task")?, 8)) }
+            }),
+            "Looking for a tool",
+        ));
+        let me = self.me.clone();
+        reg.add(Tool::new(
+            "save_preference",
+            "Remember how the user wants something done from now on (only their own instructions).",
+            params(
+                &["about", "preference"],
+                &[
+                    ("about", prop("string", "Short topic, e.g. \"email replies to Dana\"")),
+                    ("preference", prop("string", "The instruction, in the user's words")),
+                    ("replaces", json!({"type": "array", "items": {"type": "integer"}, "description": "Ids of preferences this changes"})),
+                ],
+            ),
+            handler(move |a: Args| {
+                let me = me.clone();
+                async move {
+                    let core = me.upgrade().ok_or_else(|| anyhow::anyhow!("Fane is shutting down"))?;
+                    let replaces: Vec<i64> = match a.0.get("replaces") {
+                        Some(Value::Array(v)) => v.iter().filter_map(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok())).collect(),
+                        _ => vec![],
+                    };
+                    let (pref, old) = core.prefs.save(&a.str("about"), &a.require("preference")?, &replaces, &core.known_names())?;
+                    let note = if old.is_empty() { String::new() } else { format!(" (replacing {})", old.iter().map(|p| format!("“{}”", p.text)).collect::<Vec<_>>().join(", ")) };
+                    core.notify(format!("Remembered: {}{note}", pref.text));
+                    Ok(json!(format!("saved preference [{}]{note}", pref.id)))
+                }
+            }),
+            "Remembering",
+        ));
+        let me = self.me.clone();
+        reg.add(Tool::new(
+            "forget_preference",
+            "Forget one of the user's preferences by id (when they cancel it).",
+            params(&["id"], &[("id", prop("integer", ""))]),
+            handler(move |a: Args| {
+                let me = me.clone();
+                async move {
+                    let core = me.upgrade().ok_or_else(|| anyhow::anyhow!("Fane is shutting down"))?;
+                    match core.prefs.forget(a.int("id", -1)) {
+                        Some(p) => {
+                            core.notify(format!("Forgot: {}", p.text));
+                            Ok(json!(format!("forgot preference [{}]", p.id)))
+                        }
+                        None => Ok(json!("error: no preference with that id")),
+                    }
+                }
+            }),
+            "Forgetting",
+        ));
+    }
+
+    pub fn index_status(&self) -> String {
+        let n = self.index.file_count();
+        let caps = self.index.capabilities().len();
+        if self.index.ready() {
+            format!("{n} files and {caps} tools/agents indexed")
+        } else {
+            format!("Indexing… ({n} files so far)")
+        }
+    }
+
+    pub fn rebuild_index(self: &Arc<Self>) {
+        let index = self.index.clone();
+        let me = self.clone();
+        self.rt.spawn(async move {
+            let stats = tokio::task::spawn_blocking(move || index.scan()).await;
+            if let Ok(Ok(s)) = stats {
+                me.notify(format!(
+                    "Index updated: {} files ({} new or changed, {} removed)",
+                    s.files, s.added_or_changed, s.removed
+                ));
+            }
+            me.refresh_capabilities();
+        });
     }
 
     /// Save the folders the file tools may use (from Settings) and apply them now.
@@ -391,6 +592,10 @@ impl Core {
         set_value("files", "roots", crate::config::str_array(&roots)).map_err(|e| e.to_string())?;
         self.cfg.write().unwrap().files.roots = roots.clone();
         self.register_file_tools();
+        // Re-index for the new folders; files outside them drop out of the index.
+        self.index.set_scope(crate::index::Scope::from_cfg(&self.cfg().files));
+        let index = self.index.clone();
+        self.rt.spawn_blocking(move || index.scan());
         Ok(if roots.is_empty() {
             "Fane can't use any files now".into()
         } else {
@@ -553,7 +758,12 @@ impl Core {
             return Ok(());
         }
         *self.last_snapshot.lock().unwrap() = Some(snap.clone());
-        let sug = self.suggester.lock().await.step(&snap, forced).await?;
+        let prefs = crate::prefs::prompt_section(&self.prefs.relevant(&snap.window.label(), 10));
+        let sug = {
+            let mut s = self.suggester.lock().await;
+            s.preferences = prefs;
+            s.step(&snap, forced).await?
+        };
         match sug {
             Some(s) if !self.busy.load(Ordering::SeqCst) => self.ui(UiEvent::Suggestion(s)),
             None if forced => self.notify("Nothing to suggest right now."),
@@ -563,8 +773,14 @@ impl Core {
     }
 
     // --- requests from the UI ----------------------------------------------------------
-    fn agent(&self, tools: ToolRegistry) -> Agent {
-        Agent::new(self.llm.clone(), tools, self.cfg().model, self.modes.clone())
+    fn agent(&self, tools: ToolRegistry, prompt: &str) -> Agent {
+        let mut agent = Agent::new(self.llm.clone(), tools, self.cfg().model, self.modes.clone());
+        agent.preferences = crate::prefs::prompt_section(&self.prefs.relevant(prompt, 15));
+        let index = self.index.clone();
+        agent.selector = Some(Arc::new(move |task: &str, n: usize| {
+            index.find_capabilities(task, n).into_iter().filter(|c| c.kind == "tool").map(|c| c.name).collect()
+        }));
+        agent
     }
 
     pub fn ask(self: &Arc<Self>, prompt: String, snap: Option<Snapshot>) -> u64 {
@@ -577,7 +793,7 @@ impl Core {
                 None => me.snapshot(true).await,
             };
             let history = me.suggester.lock().await.history.clone();
-            let agent = me.agent(me.tools.read().unwrap().clone());
+            let agent = me.agent(me.tools.read().unwrap().clone(), &prompt);
             let ui = me.clone();
             let status = move |s: &str| ui.ui(UiEvent::JobStatus(job, s.to_string()));
             *me.current_job.lock().unwrap() = Some(job);
@@ -606,7 +822,7 @@ impl Core {
         };
         let history = self.suggester.lock().await.history.clone();
         self.agent_running.store(true, Ordering::SeqCst);
-        let result = self.agent(tools).run(prompt, &snap, &history, &|_| {}).await;
+        let result = self.agent(tools, prompt).run(prompt, &snap, &history, &|_| {}).await;
         self.agent_running.store(false, Ordering::SeqCst);
         match result {
             Ok(r) => r.text,
@@ -646,6 +862,10 @@ impl Core {
                 *self.mail_error.lock().unwrap() = Some(format!("{e:#}"));
                 self.notify(format!("Fane's email is off: {e:#}"));
             }
+        }
+        drop(slot);
+        if self.ready.load(Ordering::SeqCst) {
+            self.refresh_capabilities();
         }
     }
 

@@ -32,6 +32,8 @@ pub struct Files {
     max_read: usize,
     confirm: Confirm,
     trash: Trash,
+    /// The file index: fast lookups, and kept current when these tools change files.
+    index: Option<Arc<crate::index::Index>>,
 }
 
 /// Case-insensitive wildcard match (`*` any run, `?` one character).
@@ -83,7 +85,33 @@ impl Files {
 
     pub fn with_trash(cfg: &FilesCfg, confirm: Confirm, trash: Trash) -> Self {
         let roots = cfg.roots.iter().map(|r| expand(r)).filter_map(|p| p.canonicalize().ok()).collect();
-        Self { roots, blocked: cfg.blocked.clone(), max_read: cfg.max_read_chars, confirm, trash }
+        Self { roots, blocked: cfg.blocked.clone(), max_read: cfg.max_read_chars, confirm, trash, index: None }
+    }
+
+    pub fn with_index(mut self, index: Arc<crate::index::Index>) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    fn changed(&self, path: &Path) {
+        if let Some(index) = &self.index {
+            index.refresh_path(path);
+        }
+    }
+
+    /// Index hits for `query` under `under` (all roots when empty), if the index is ready.
+    fn indexed(&self, query: &str, under: &str) -> Option<Vec<Value>> {
+        let index = self.index.as_ref().filter(|i| i.ready())?;
+        let base = if under.trim().is_empty() { None } else { Some(self.resolve(under, true).ok()?) };
+        let hits: Vec<Value> = index
+            .search_files(query, MAX_RESULTS * 2)
+            .into_iter()
+            .filter(|h| base.as_ref().is_none_or(|b| Path::new(&h.path).starts_with(b)))
+            .filter(|h| self.resolve(&h.path, true).is_ok())
+            .take(MAX_RESULTS)
+            .map(|h| serde_json::to_value(h).unwrap_or_default())
+            .collect();
+        (!hits.is_empty()).then_some(hits)
     }
 
     fn roots_text(&self) -> String {
@@ -204,6 +232,12 @@ impl Files {
     }
 
     pub fn find(&self, pattern: &str, under: &str) -> Result<Value, String> {
+        // Plain words: the index answers instantly (names, folders, and document text).
+        if !pattern.contains(['*', '?'])
+            && let Some(hits) = self.indexed(pattern, under)
+        {
+            return Ok(json!(hits));
+        }
         let pattern = if pattern.contains(['*', '?']) { pattern.to_string() } else { format!("*{pattern}*") };
         let mut hits: Vec<(std::time::SystemTime, Value)> = self
             .walk(under)?
@@ -223,6 +257,12 @@ impl Files {
         let needle = text.to_lowercase();
         if needle.trim().is_empty() {
             return Err("nothing to search for".into());
+        }
+        // Documents are in the index; fall back to reading every file (code, other text).
+        if pattern.is_empty()
+            && let Some(hits) = self.indexed(text, under)
+        {
+            return Ok(json!(hits));
         }
         let mut hits = vec![];
         for path in self.walk(under)? {
@@ -318,6 +358,7 @@ impl Files {
             std::fs::write(&p, content)
         };
         result.map_err(|e| format!("can't write {}: {e}", p.display()))?;
+        self.changed(&p);
         Ok(format!(
             "{} {}",
             if append {
@@ -351,6 +392,7 @@ impl Files {
             return Ok("not changed: the user declined (or didn't answer)".into());
         }
         std::fs::write(&p, text.replacen(old, new, 1)).map_err(|e| format!("can't write {}: {e}", p.display()))?;
+        self.changed(&p);
         Ok(format!("edited {}", p.display()))
     }
 
@@ -371,6 +413,8 @@ impl Files {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         std::fs::rename(&src, &dest).map_err(|e| format!("can't move {}: {e}", src.display()))?;
+        self.changed(&src);
+        self.changed(&dest);
         Ok(format!("moved {} to {}", src.display(), dest.display()))
     }
 
@@ -392,6 +436,7 @@ impl Files {
             return Ok("not deleted: the user declined (or didn't answer)".into());
         }
         (self.trash)(&p).map_err(|e| format!("can't move {} to the trash: {e}", p.display()))?;
+        self.changed(&p);
         Ok(format!("moved {} to the trash", p.display()))
     }
 

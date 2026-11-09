@@ -164,6 +164,7 @@ impl ToolRegistry {
         reg
     }
 
+    #[allow(dead_code)]
     pub fn specs(&self) -> Vec<Value> {
         self.iter().map(Tool::spec).collect()
     }

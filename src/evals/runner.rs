@@ -498,7 +498,51 @@ impl EvalRunner {
 
     async fn agent_task(&self, llm: &Arc<Ollama>, task: &AgentTask, modes: &ToolModes) -> AgentRecord {
         let mocks = Mocks::new();
-        let agent = Agent::new(llm.clone(), mocks.registry(), self.cfg.model.clone(), modes.clone());
+        let registry = mocks.registry();
+        let mut agent = Agent::new(llm.clone(), registry.clone(), self.cfg.model.clone(), modes.clone());
+        // As in Fane: saved preferences in the prompt, and tools picked from the capability index.
+        let prefs: Vec<crate::prefs::Pref> = task
+            .preferences
+            .iter()
+            .enumerate()
+            .map(|(i, (about, text))| crate::prefs::Pref {
+                id: i as i64 + 1,
+                about: about.to_string(),
+                text: text.to_string(),
+                refs: vec![],
+            })
+            .collect();
+        agent.preferences = crate::prefs::prompt_section(&prefs);
+        let index = Arc::new(crate::index::Index::new(
+            Arc::new(crate::store::Store::in_memory().expect("in-memory index")),
+            crate::index::Scope { roots: vec![], blocked: vec![] },
+        ));
+        let caps: Vec<crate::index::Capability> = registry
+            .iter()
+            .map(|t| crate::index::Capability {
+                kind: "tool".into(),
+                name: t.name.clone(),
+                source: "eval".into(),
+                description: t.description.clone(),
+            })
+            .collect();
+        index.sync_capabilities(&caps);
+        let find = index.clone();
+        let mut reg = registry;
+        reg.add(crate::tools::Tool::new(
+            "find_tools",
+            "Find which tool, MCP server or coding agent can do a task.",
+            crate::tools::params(&["task"], &[("task", crate::tools::prop("string", ""))]),
+            crate::tools::handler(move |a: crate::tools::Args| {
+                let find = find.clone();
+                async move { Ok(find.find_capabilities_json(&a.require("task")?, 8)) }
+            }),
+            "Looking for a tool",
+        ));
+        agent.tools = reg;
+        agent.selector = Some(Arc::new(move |t: &str, n: usize| {
+            index.find_capabilities(t, n).into_iter().map(|c| c.name).collect()
+        }));
         let mut rec = AgentRecord { case: task.name.into(), prompt: task.prompt.into(), ..Default::default() };
         let before = llm.totals();
         let t0 = Instant::now();
@@ -1129,9 +1173,9 @@ mod tests {
     #[test]
     fn list_has_all_cases() {
         let lines = list_cases();
-        assert_eq!(lines.len(), 15);
+        assert_eq!(lines.len(), 18);
         assert_eq!(lines.iter().filter(|l| l.starts_with("suggest  ")).count(), 7);
-        assert_eq!(lines.iter().filter(|l| l.starts_with("agent    ")).count(), 8);
+        assert_eq!(lines.iter().filter(|l| l.starts_with("agent    ")).count(), 11);
         assert_eq!(lines[0], "suggest  email              expect: suggest");
         assert_eq!(lines[6], "suggest  article            expect: not scored");
         assert_eq!(lines[7], "agent    reply_insert       Reply to Dana saying Thursday at 3pm works for me.");
