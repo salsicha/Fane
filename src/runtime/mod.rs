@@ -203,6 +203,7 @@ impl Runtime {
             ["-ngl", ngl, "-c", &cfg.runtime.context.to_string(), "--jinja", "--host", "127.0.0.1", "--alias", model]
                 .map(String::from),
         );
+        args.extend(cfg.runtime.llama_args.iter().cloned());
         args.extend(files.args.iter().cloned());
         let port = self
             .spawn(&key, &dir.join(install::exe("llama-server")), args, "/health", Duration::from_secs(900))

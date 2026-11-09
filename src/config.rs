@@ -539,6 +539,9 @@ pub struct RuntimeCfg {
     pub video_model: String,
     /// Context length for the language models.
     pub context: u32,
+    /// Extra llama-server arguments for every language model. Bigger batches process long
+    /// prompts (tool lists, screenshots, coding agents' context) faster.
+    pub llama_args: Vec<String>,
     /// Stop a model nobody has used for this many minutes, freeing its GPU (0 = never).
     pub idle_minutes: u64,
     /// Use models Ollama has already downloaded instead of downloading them again.
@@ -566,6 +569,7 @@ impl Default for RuntimeCfg {
             image_model: "z-image-turbo".into(),
             video_model: "wan2.2-5b".into(),
             context: 32768,
+            llama_args: ["-b", "2048", "-ub", "2048"].map(String::from).to_vec(),
             idle_minutes: 15,
             reuse_ollama: true,
             vram_gb: BTreeMap::new(),

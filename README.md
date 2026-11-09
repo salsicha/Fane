@@ -350,8 +350,16 @@ coding tasks are handed to:
 
 Both run with llama.cpp's speculative decoding (each model's MTP draft), which roughly
 doubles generation speed. On a Tesla V100 (32 GB), Gemma 4 26B generates about 130
-tokens/s (the same as Ollama) and Qwen 3.8 27B about MTP_QWEN tokens/s; on the NUC's Intel Iris
-Xe (Vulkan, shared memory) Gemma 4 runs at about 12 tokens/s. EVAL_LINE
+tokens/s (the same as Ollama) and Qwen 3.8 27B about 70 tokens/s (33 without its draft); on the NUC's Intel Iris
+Xe (Vulkan, shared memory) Gemma 4 runs at about 12 tokens/s.
+
+On `fane eval` both models pass all 11 agent tasks (30/30 checks) and understand all seven
+screens. On the V100 a median agent task takes 5.8 s with Gemma 4 and 10.7 s with Qwen 3.8,
+roughly twice as long as under Ollama: generation is as fast or faster, but llama.cpp
+processes long prompts (Fane's tool list, screenshots) more slowly on this older GPU, where
+it can't use flash attention for these models. Each harness fixed the eval's failing test:
+CodeGem in 7 s and Qwen Code in about 9 minutes (47 requests reading the project, mostly
+prompt processing).
 
 Any other model works too: anything Ollama has downloaded (by its Ollama name), or a GGUF
 file:
@@ -633,6 +641,13 @@ logic, the eval harness, and installing the `.deb` from the apt repository. The 
 Windows builds compile and pass the unit tests in CI but haven't been tried on a real
 desktop yet, and neither have the GNOME extension and live Gmail.
 
+The model server has been tested on a NUC with a Tesla V100 and an Intel Iris Xe: setup
+(llama.cpp CUDA and Vulkan builds, Ollama's models reused, stable-diffusion.cpp compiled
+locally), Gemma 4 on the Iris Xe and Qwen 3.8 on the V100 at the same time, images and
+video swapping Qwen off the V100 and back, and a second Fane sending chat, coding, image
+and video requests to it over the network with the sharing token. CI's smoke test runs
+setup and a chat request through `fane serve` on clean macOS and Windows machines.
+
 Ideas for next steps:
 
 - Read the focused text field through AT-SPI / accessibility APIs, which is more precise
@@ -641,3 +656,6 @@ Ideas for next steps:
 - Built-in Evolution, GNOME Calendar and browser-tab connectors.
 - Streaming answers, and cancelling a running task.
 - Learn from which suggestions you accept and dismiss.
+- Faster prompt processing on older GPUs (flash attention on Volta), and measuring each
+  model's real GPU memory instead of estimating it.
+- HTTPS (or a VPN-style tunnel) between Fanes.
