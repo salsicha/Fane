@@ -30,6 +30,8 @@ struct McpServer {
     cfg: McpServerCfg,
     client: Mutex<Option<Arc<Client>>>,
     error: Mutex<Option<String>>,
+    /// When Fane last opened the server's app (so a slow start isn't opened twice).
+    launched: Mutex<Option<std::time::Instant>>,
 }
 
 impl McpServer {
@@ -87,7 +89,17 @@ fn resolve_program(command: &str) -> PathBuf {
 }
 
 pub struct McpManager {
-    servers: Vec<Arc<McpServer>>,
+    servers: Mutex<Vec<Arc<McpServer>>>,
+}
+
+fn new_server(name: &str, cfg: &McpServerCfg) -> Arc<McpServer> {
+    Arc::new(McpServer {
+        name: name.to_string(),
+        cfg: cfg.clone(),
+        client: Mutex::new(None),
+        error: Mutex::new(None),
+        launched: Mutex::new(None),
+    })
 }
 
 impl McpManager {
@@ -95,52 +107,137 @@ impl McpManager {
         let servers = servers
             .iter()
             .filter(|(_, cfg)| !cfg.command.trim().is_empty())
-            .map(|(name, cfg)| {
-                Arc::new(McpServer {
-                    name: name.clone(),
-                    cfg: cfg.clone(),
-                    client: Mutex::new(None),
-                    error: Mutex::new(None),
-                })
-            })
+            .map(|(name, cfg)| new_server(name, cfg))
             .collect();
-        Self { servers }
+        Self { servers: Mutex::new(servers) }
+    }
+
+    fn all(&self) -> Vec<Arc<McpServer>> {
+        self.servers.lock().unwrap().clone()
     }
 
     /// Names of the configured servers (those with a command).
     #[allow(dead_code)]
     pub fn names(&self) -> Vec<String> {
-        self.servers.iter().map(|s| s.name.clone()).collect()
+        self.all().iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// Whether `name` is connected.
+    pub fn running(&self, name: &str) -> bool {
+        self.all().iter().any(|s| s.name == name && s.client().is_some())
     }
 
     /// Start every server (30 s timeout each, in parallel) and add their tools to `registry`
     /// as "<server>__<tool>" (non-alphanumerics -> '_'), status "Asking <server>".
     pub async fn start(&self, registry: &mut ToolRegistry) {
-        futures::future::join_all(self.servers.iter().map(|s| s.start())).await;
-        for server in &self.servers {
-            let Some(client) = server.client() else { continue };
-            let tools = match client.list_all_tools().await {
-                Ok(t) => t,
-                Err(e) => {
-                    server.set_error(format!("listing tools failed: {e}"));
-                    continue;
-                }
-            };
-            for t in &tools {
-                registry.add(wrap_tool(server, t));
-            }
-            tracing::info!("MCP {}: {} tools", server.name, tools.len());
+        let servers = self.all();
+        futures::future::join_all(servers.iter().map(|s| s.start())).await;
+        for server in &servers {
+            add_tools(server, registry).await;
+        }
+    }
+
+    /// Add (or replace) a server while Fane runs, and its tools. Returns how many tools it has.
+    pub async fn add(&self, name: &str, cfg: &McpServerCfg, registry: &mut ToolRegistry) -> Result<usize, String> {
+        self.remove(name, registry).await;
+        let server = new_server(name, cfg);
+        self.servers.lock().unwrap().push(server.clone());
+        server.start().await;
+        if let Some(e) = server.error.lock().unwrap().clone() {
+            return Err(e);
+        }
+        Ok(add_tools(&server, registry).await)
+    }
+
+    /// Stop a server and take its tools out.
+    pub async fn remove(&self, name: &str, registry: &mut ToolRegistry) {
+        let gone: Vec<Arc<McpServer>> = {
+            let mut servers = self.servers.lock().unwrap();
+            let (gone, kept) = servers.drain(..).partition(|s| s.name == name);
+            *servers = kept;
+            gone
+        };
+        for s in gone {
+            s.stop().await;
+        }
+        let prefix = format!("{}__", safe_name(name));
+        for tool in registry.names().into_iter().filter(|n| n.starts_with(&prefix)) {
+            registry.remove(&tool);
         }
     }
 
     /// Names of servers that failed, with the error.
     pub fn errors(&self) -> Vec<(String, String)> {
-        self.servers.iter().filter_map(|s| s.error.lock().unwrap().clone().map(|e| (s.name.clone(), e))).collect()
+        self.all().iter().filter_map(|s| s.error.lock().unwrap().clone().map(|e| (s.name.clone(), e))).collect()
     }
 
     pub async fn stop(&self) {
-        futures::future::join_all(self.servers.iter().map(|s| s.stop())).await;
+        futures::future::join_all(self.all().iter().map(|s| s.stop())).await;
     }
+}
+
+async fn add_tools(server: &Arc<McpServer>, registry: &mut ToolRegistry) -> usize {
+    let Some(client) = server.client() else { return 0 };
+    let tools = match client.list_all_tools().await {
+        Ok(t) => t,
+        Err(e) => {
+            server.set_error(format!("listing tools failed: {e}"));
+            return 0;
+        }
+    };
+    for t in &tools {
+        registry.add(wrap_tool(server, t));
+    }
+    tracing::info!("MCP {}: {} tools", server.name, tools.len());
+    tools.len()
+}
+
+/// Whether something listens on 127.0.0.1:`port`.
+async fn port_open(port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(("127.0.0.1", port))).await,
+        Ok(Ok(_))
+    )
+}
+
+/// Open the server's app if its add-on isn't listening, and wait (up to 90 s) until it is.
+async fn ensure_app(server: &McpServer) -> Result<(), String> {
+    let (launch, port) = (&server.cfg.launch, server.cfg.wait_port);
+    if launch.is_empty() || port == 0 || port_open(port).await {
+        return Ok(());
+    }
+    let (program, args) = launch.split_first().unwrap();
+    // Opened in the last few minutes and still starting (or showing a first-run dialog): wait
+    // for it instead of opening a second copy.
+    let recently = server.launched.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_secs(300));
+    if !recently {
+        tracing::info!("opening {} for MCP {}", program, server.name);
+        let mut cmd = std::process::Command::new(resolve_program(program));
+        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0); // keeps running if Fane quits
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("couldn't open {program}: {e}"))?;
+        // Collect it when the user closes the app, so it doesn't linger as a zombie.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        *server.launched.lock().unwrap() = Some(std::time::Instant::now());
+    }
+    for _ in 0..180 {
+        if port_open(port).await {
+            // The add-on is up; give it a moment to finish loading.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Err(format!(
+        "{} is open but its MCP add-on isn't answering on port {port} yet; if the app shows a dialog, close it and try again",
+        server.name
+    ))
 }
 
 fn wrap_tool(server: &Arc<McpServer>, t: &rmcp::model::Tool) -> Tool {
@@ -162,6 +259,9 @@ fn wrap_tool(server: &Arc<McpServer>, t: &rmcp::model::Tool) -> Tool {
             let Some(client) = server.client() else {
                 return Ok(Value::String(format!("error: MCP server {} is not running", server.name)));
             };
+            if let Err(e) = ensure_app(&server).await {
+                return Ok(Value::String(format!("error: {e}")));
+            }
             let params = CallToolRequestParams::new(tool_name).with_arguments(args.0);
             let result = client.call_tool(params).await?;
             Ok(Value::String(render_result(&result)))
@@ -329,6 +429,7 @@ for line in sys.stdin:
                 args: vec!["-c".into(), FAKE_SERVER.into()],
                 env: BTreeMap::from([("FANE_FAKE".to_string(), "env-ok".to_string())]),
                 cwd: Some(std::env::temp_dir().display().to_string()),
+                ..Default::default()
             },
         );
         let mgr = McpManager::new(&servers);
@@ -347,18 +448,38 @@ for line in sys.stdin:
         assert_eq!(reg.call("fake_srv__echo_text", args).await, "echo: hi env-ok");
         assert_eq!(reg.call("fake_srv__fail", Args::default()).await, "error: nope");
 
+        // Added while running, for an "app" that has to be opened first: a stand-in that
+        // listens on a free port, like Blender's add-on.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let marker = std::env::temp_dir().join(format!("fane-app-opened-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let app = format!(
+            "import socket,time; open({:?},'w').close(); s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(20)",
+            marker.display().to_string()
+        );
+        let cfg = McpServerCfg {
+            command: python.display().to_string(),
+            args: vec!["-c".into(), FAKE_SERVER.into()],
+            launch: vec![python.display().to_string(), "-c".into(), app],
+            wait_port: port,
+            ..Default::default()
+        };
+        assert_eq!(mgr.add("app", &cfg, &mut reg).await, Ok(2));
+        assert!(mgr.running("app") && reg.contains("app__echo_text"));
+        assert!(!marker.exists(), "not opened until a tool is used");
+        assert!(reg.call("app__echo_text", Args::from_value(json!({"text": "x"}))).await.starts_with("echo: x"));
+        assert!(marker.exists(), "the app was opened");
+        mgr.remove("app", &mut reg).await;
+        assert!(!reg.contains("app__echo_text") && !mgr.running("app"));
+        let _ = std::fs::remove_file(&marker);
+
         mgr.stop().await;
         assert_eq!(reg.call("fake_srv__fail", Args::default()).await, "error: MCP server fake.srv is not running");
     }
 
     #[test]
     fn not_running_message() {
-        let server = Arc::new(McpServer {
-            name: "fs".into(),
-            cfg: McpServerCfg::default(),
-            client: Mutex::new(None),
-            error: Mutex::new(None),
-        });
+        let server = new_server("fs", &McpServerCfg::default());
         let mut schema = serde_json::Map::new();
         schema.insert("type".into(), json!("object"));
         let t = rmcp::model::Tool::new("read-file", "Read a file", Arc::new(schema));

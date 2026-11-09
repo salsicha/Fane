@@ -703,6 +703,7 @@ impl Core {
         self.register_file_tools();
         self.register_memory_tools();
         self.register_media_tools();
+        self.register_app_tool();
     }
 
     /// (Re)build the filesystem tools from `[files]`; changes are confirmed on a card.
@@ -1228,6 +1229,134 @@ impl Core {
         self.setup_mail().await;
     }
 
+    // --- apps (MCP) ------------------------------------------------------------------------
+    /// The apps Fane can set up, and how far each is.
+    pub fn apps_status(&self) -> Vec<crate::connectors::apps::AppStatus> {
+        let cfg = self.cfg();
+        crate::connectors::apps::APPS
+            .iter()
+            .map(|a| crate::connectors::apps::AppStatus {
+                id: a.id.into(),
+                name: a.name.into(),
+                what: a.what.into(),
+                installed: crate::connectors::apps::find(a).is_some(),
+                configured: cfg.mcp.servers.contains_key(a.id),
+                running: self.mcp.running(a.id),
+            })
+            .collect()
+    }
+
+    /// Set up an app for Fane (after the user confirms on a card, unless `confirmed`): install
+    /// it if needed, its MCP add-on and server, and start using its tools.
+    pub async fn setup_app(self: &Arc<Self>, id: &str, confirmed: bool) -> Result<String, String> {
+        use crate::connectors::apps;
+        let app = apps::spec(id).ok_or_else(|| {
+            format!(
+                "unknown app {id:?} (Fane can set up: {})",
+                apps::APPS.iter().map(|a| a.id).collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        if self.cfg().mcp.servers.contains_key(app.id) && self.mcp.running(app.id) {
+            return Ok(format!("{} is already set up; use its {}__ tools", app.name, app.id));
+        }
+        let steps = apps::plan(app)?;
+        if !confirmed {
+            let text = format!(
+                "So Fane can {}, it will:\n• {}\n\nFrom {} and the app's usual source.",
+                app.what,
+                steps.join("\n• "),
+                app.homepage
+            );
+            let ok = self
+                .confirm(
+                    json!({"title": format!("Set up {}?", app.name), "meta": "· apps", "text": text, "ok": "Set up"}),
+                )
+                .await;
+            if !ok {
+                return Err(format!("{} wasn't set up", app.name));
+            }
+        }
+        let job = self.job_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        self.ui(UiEvent::Working { job, title: format!("Setting up {}", app.name) });
+        let status = |s: &str| self.ui(UiEvent::JobStatus(job, s.to_string()));
+        let result = self.setup_app_steps(app, &status).await;
+        let ev = match &result {
+            Ok(msg) => UiEvent::JobDone {
+                job,
+                result: Some(AgentResult { text: msg.clone(), ..Default::default() }),
+                error: None,
+            },
+            Err(e) => UiEvent::JobDone { job, result: None, error: Some(format!("{} isn't set up: {e}", app.name)) },
+        };
+        self.ui(ev);
+        self.ui(UiEvent::ModelsChanged);
+        result
+    }
+
+    async fn setup_app_steps(
+        &self,
+        app: &crate::connectors::apps::AppSpec,
+        status: crate::setup::Progress<'_>,
+    ) -> Result<String, String> {
+        let server = crate::connectors::apps::setup(app, true, status).await?;
+        crate::config::set_mcp_server(app.id, Some(&server)).map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().mcp.servers.insert(app.id.to_string(), server.clone());
+        status("Connecting to its MCP server…");
+        let mut reg = self.tools.read().unwrap().clone();
+        let n = self.mcp.add(app.id, &server, &mut reg).await?;
+        *self.tools.write().unwrap() = reg;
+        self.register_app_tool();
+        self.refresh_capabilities();
+        Ok(format!("{} is set up ({n} tools). Ask Fane to {}; it opens {} when needed.", app.name, app.what, app.name))
+    }
+
+    /// Stop using an app's MCP server (the app itself stays installed).
+    pub async fn remove_app(&self, id: &str) -> Result<String, String> {
+        crate::config::set_mcp_server(id, None).map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().mcp.servers.remove(id);
+        let mut reg = self.tools.read().unwrap().clone();
+        self.mcp.remove(id, &mut reg).await;
+        *self.tools.write().unwrap() = reg;
+        self.register_app_tool();
+        self.refresh_capabilities();
+        Ok(format!("Fane no longer uses {id} (the app itself is still installed)"))
+    }
+
+    /// `set_up_app`, offering the apps that aren't set up yet (none left: no tool).
+    fn register_app_tool(&self) {
+        use crate::tools::{Tool, params, prop};
+        let cfg = self.cfg();
+        let names: Vec<String> = crate::connectors::apps::APPS
+            .iter()
+            .filter(|a| !cfg.mcp.servers.contains_key(a.id))
+            .map(|a| format!("{} ({})", a.id, a.what))
+            .collect();
+        if names.is_empty() {
+            self.tools.write().unwrap().remove("set_up_app");
+            return;
+        }
+        let me = self.me.clone();
+        self.tools.write().unwrap().add(Tool::new(
+            "set_up_app",
+            &format!(
+                "Install and connect a desktop app that isn't set up yet, so you can use it through its tools; the user confirms first. Apps: {}.",
+                names.join("; ")
+            ),
+            params(&["app"], &[("app", prop("string", "The app's id"))]),
+            handler(move |a: Args| {
+                let me = me.clone();
+                async move {
+                    let core = me.upgrade().ok_or_else(|| anyhow::anyhow!("Fane is shutting down"))?;
+                    Ok(json!(match core.setup_app(&a.require("app")?, false).await {
+                        Ok(m) => m,
+                        Err(e) => format!("error: {e}"),
+                    }))
+                }
+            }),
+            "Setting up the app",
+        ));
+    }
+
     // --- other computers and servers ---------------------------------------------------------
     /// Model servers on this computer and the network (other Fanes, Ollama, ...).
     pub async fn discover_servers(&self) -> Vec<Server> {
@@ -1341,6 +1470,15 @@ impl Core {
                 let token = arg("token");
                 self.rt.spawn(async move {
                     if let Err(e) = me.use_server(&host, &token).await {
+                        me.notify(e);
+                    }
+                });
+            }
+            "app_setup" => {
+                let me = self.clone();
+                let id = arg("app");
+                self.rt.spawn(async move {
+                    if let Err(e) = me.setup_app(&id, true).await {
                         me.notify(e);
                     }
                 });

@@ -403,6 +403,7 @@ impl App {
         let first = !self.visible.contains(&WindowKind::Settings);
         let actions = self.settings.open(self.core.cfg());
         self.settings.set_memory(self.core.prefs.list(), self.core.index_status());
+        self.settings.set_apps(self.core.apps_status());
         if first {
             self.place(event_loop, WindowKind::Settings);
         }
@@ -459,6 +460,18 @@ impl App {
                 });
             }
             SettingsAction::Install(want) => self.core.run_setup(want),
+            SettingsAction::SetupApp(id) => {
+                self.rt.spawn(async move {
+                    let r = core.setup_app(&id, false).await;
+                    let _ = proxy.send_event(UiEvent::ModelsStatus(r));
+                });
+            }
+            SettingsAction::RemoveApp(id) => {
+                self.rt.spawn(async move {
+                    let r = core.remove_app(&id).await;
+                    let _ = proxy.send_event(UiEvent::ModelsStatus(r));
+                });
+            }
             SettingsAction::Copy(text) => {
                 let core = self.core.clone();
                 self.rt.spawn(async move { core.copy_text(text).await });
@@ -673,6 +686,7 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::ModelsChanged => {
                 self.settings.set_cfg(self.core.cfg());
+                self.settings.set_apps(self.core.apps_status());
                 if self.visible.contains(&WindowKind::Settings) {
                     self.on_settings_action(SettingsAction::RefreshModels);
                 }
@@ -683,6 +697,7 @@ impl ApplicationHandler<UiEvent> for App {
             }
             UiEvent::ModelsStatus(r) => {
                 self.settings.set_cfg(self.core.cfg());
+                self.settings.set_apps(self.core.apps_status());
                 self.settings.models_status(r);
                 self.on_settings_action(SettingsAction::RefreshModels);
                 self.redraw(WindowKind::Settings);

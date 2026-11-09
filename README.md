@@ -288,6 +288,38 @@ fane remote add 192.168.1.20 --token …  # another Fane
 fane servers use 192.168.1.30:11434     # an Ollama server for chat
 ```
 
+## Apps
+
+Fane can work inside desktop apps through their MCP servers. **Settings → Apps → Set up** (or
+asking Fane *"set up Blender"*, or `fane apps setup blender`) does the whole job after you
+confirm a card that lists each step:
+
+1. installs the app if it's missing: from Flathub just for you (no password) or as a snap on
+   Linux, with Homebrew on macOS, with winget on Windows;
+2. gets the MCP server's runner: uv (downloaded into `~/.fane/bin` if you don't have it) or
+   Node.js;
+3. installs the app's MCP add-on and turns it on (asking the app itself where its add-ons
+   go);
+4. adds the server under `[mcp.servers]` and connects to it right away.
+
+From then on you can ask for things like *"make a low-poly tree in Blender"*. If the app isn't
+open, Fane opens it the first time one of its tools is used and waits for its add-on.
+
+| App | What Fane can do | MCP server |
+| --- | --- | --- |
+| Blender | make and edit 3D models, scenes, materials and renders | [mcp-for-blender](https://github.com/ahujasid/mcp-for-blender) 2.2.7 |
+| FreeCAD | design precise parts and assemblies, run FEM analyses | [freecad-mcp](https://github.com/neka-nat/freecad-mcp) 0.1.30 (its RPC server set to start with FreeCAD) |
+| Web browser | browse sites, fill in forms, read pages, in its own browser profile | [Playwright MCP](https://github.com/microsoft/playwright-mcp) 0.0.85 (needs Node.js and Chrome) |
+
+`fane apps` lists them, and **Remove** (or `fane apps remove blender`) disconnects one and leaves
+the app installed. The servers are pinned to the versions above. Any other MCP server can
+still be added by hand under `[mcp.servers]`; `launch` and `wait_port` make Fane open its app
+on demand there too.
+
+These add-ons can run code inside the app (Blender's and FreeCAD's both have an
+"execute code" tool), so whatever the model asks for runs with your permissions. They only
+listen on this computer. Emailed requests can't set up apps.
+
 ## Images and video
 
 With images set up (`fane setup --images`, or the installer option), the assistant gets a
@@ -302,11 +334,12 @@ image model anywhere and Codex installed, Codex makes the image instead.
 | Images | [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) (Q8, 9 steps) | ~11 GB | ~11 GB at 1024×1024 |
 | Video | [Wan 2.2 TI2V 5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) (Q8) | ~13 GB | more; the VAE is the hungry part |
 
-stable-diffusion.cpp's own Linux builds need a newer C library than Ubuntu 24.04 has, so on
-Linux Fane uses its own builds (a GitHub Actions workflow builds them for CUDA and Vulkan), or
-compiles it on your computer if `cmake`, a C++ compiler and `glslc` / `libvulkan-dev` (or the
-CUDA toolkit) are installed. On a Tesla V100 through Vulkan, a 1024×1024 image takes about a
-minute.
+stable-diffusion.cpp's own Linux builds need a newer C library than Ubuntu 24.04 has and
+don't include CUDA, so on Linux Fane downloads its own builds (CUDA 12 and Vulkan, made by
+[`sd-runtime.yml`](.github/workflows/sd-runtime.yml) and attached to the
+[`sd-master-a3c49b1`](https://github.com/salsicha/Fane/releases/tag/sd-master-a3c49b1)
+release), or compiles it on your computer as a last resort. On a Tesla V100, a 1024×1024
+image takes about 11 seconds with CUDA (about a minute with Vulkan).
 
 ## Fane's own email
 
@@ -647,6 +680,12 @@ locally), Gemma 4 on the Iris Xe and Qwen 3.8 on the V100 at the same time, imag
 video swapping Qwen off the V100 and back, and a second Fane sending chat, coding, image
 and video requests to it over the network with the sharing token. CI's smoke test runs
 setup and a chat request through `fane serve` on clean macOS and Windows machines.
+
+App setup has been tested on the same NUC: Blender from Flathub with its add-on turned on,
+then *"make a red sphere and a blue cube"* opening Blender by itself and building the scene;
+FreeCAD's workbench installed and starting its server with FreeCAD; and the browser's
+Playwright server connecting. Driving FreeCAD and the browser on a real desktop is still to
+be tried.
 
 Ideas for next steps:
 

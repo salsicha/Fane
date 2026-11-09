@@ -491,6 +491,7 @@ impl Default for AgentMailCfg {
                 "edit_file",
                 "move_file",
                 "delete_file",
+                "set_up_app",
             ]
             .map(String::from)
             .to_vec(),
@@ -513,6 +514,17 @@ pub struct McpServerCfg {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<String>,
+    /// For servers that talk to a desktop app (Blender, FreeCAD): the command that opens the
+    /// app, and the port its add-on listens on. When a tool is used and nothing listens there,
+    /// Fane opens the app and waits for it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub launch: Vec<String>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub wait_port: u16,
+}
+
+fn is_zero(n: &u16) -> bool {
+    *n == 0
 }
 
 /// The models Fane runs on this computer, with llama.cpp (chat and coding) and
@@ -881,6 +893,53 @@ pub fn set_remote_in(path: &Path, name: &str, remote: Option<&RemoteCfg>) -> Res
     Ok(())
 }
 
+/// Add, replace (`Some`) or remove (`None`) `[mcp.servers.<name>]`.
+pub fn set_mcp_server(name: &str, server: Option<&McpServerCfg>) -> Result<()> {
+    set_mcp_server_in(&CONFIG_PATH, name, server)
+}
+
+pub fn set_mcp_server_in(path: &Path, name: &str, server: Option<&McpServerCfg>) -> Result<()> {
+    if !path.exists() {
+        Config::load_from(path)?;
+    }
+    let text = std::fs::read_to_string(path)?;
+    let mut doc: toml_edit::DocumentMut = text.parse().with_context(|| format!("parsing {}", path.display()))?;
+    for key in ["mcp", "servers"] {
+        let parent = if key == "mcp" {
+            doc.as_table_mut()
+        } else {
+            doc["mcp"].as_table_mut().context("[mcp] is not a table")?
+        };
+        if !parent.contains_table(key) {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            parent.insert(key, toml_edit::Item::Table(t));
+        }
+    }
+    let servers = doc["mcp"]["servers"].as_table_mut().context("[mcp.servers] is not a table")?;
+    match server {
+        Some(s) => {
+            let mut t = toml_edit::Table::new();
+            t["command"] = toml_edit::value(s.command.as_str());
+            t["args"] = toml_edit::value(str_array(&s.args));
+            if !s.launch.is_empty() {
+                t["launch"] = toml_edit::value(str_array(&s.launch));
+            }
+            if s.wait_port > 0 {
+                t["wait_port"] = toml_edit::value(s.wait_port as i64);
+            }
+            servers.insert(name, toml_edit::Item::Table(t));
+        }
+        None => {
+            servers.remove(name);
+        }
+    }
+    let out = doc.to_string();
+    toml::from_str::<Config>(&out).context("refusing to write a config that can't be read back")?;
+    std::fs::write(path, out)?;
+    Ok(())
+}
+
 /// A string list as a TOML array value.
 pub fn str_array(items: &[String]) -> toml_edit::Value {
     let mut a = toml_edit::Array::new();
@@ -955,6 +1014,30 @@ mod tests {
         set_remote_in(&p, "nuc", None).unwrap();
         let cfg: Config = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert!(cfg.remotes.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mcp_servers_round_trip() {
+        let dir = std::env::temp_dir().join(format!("fane-cfg-mcp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("c.toml");
+        std::fs::write(&p, "# mine\n[mcp.servers.fs]\ncommand = \"npx\"\n").unwrap();
+        let blender = McpServerCfg {
+            command: "/home/me/.fane/bin/uvx".into(),
+            args: vec!["mcp-for-blender@2.2.7".into()],
+            launch: vec!["flatpak".into(), "run".into(), "org.blender.Blender".into()],
+            wait_port: 9876,
+            ..Default::default()
+        };
+        set_mcp_server_in(&p, "blender", Some(&blender)).unwrap();
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(cfg.mcp.servers["blender"].launch, blender.launch);
+        assert_eq!(cfg.mcp.servers["blender"].wait_port, 9876);
+        assert_eq!(cfg.mcp.servers["fs"].command, "npx", "others stay");
+        set_mcp_server_in(&p, "blender", None).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("# mine") && !text.contains("blender"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

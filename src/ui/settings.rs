@@ -22,6 +22,8 @@ pub enum SettingsAction {
     Install(Want),
     SetShare(bool),
     SetService(bool),
+    SetupApp(String),
+    RemoveApp(String),
     Copy(String),
     RefreshAccounts,
     SelectAccount(String),
@@ -53,6 +55,7 @@ pub struct Settings {
     roots_status: String,
     prefs: Vec<crate::prefs::Pref>,
     index_status: String,
+    apps: Vec<crate::connectors::apps::AppStatus>,
 }
 
 fn role_label(role: Role) -> &'static str {
@@ -93,7 +96,12 @@ impl Settings {
             roots_status: String::new(),
             prefs: vec![],
             index_status: String::new(),
+            apps: vec![],
         }
+    }
+
+    pub fn set_apps(&mut self, apps: Vec<crate::connectors::apps::AppStatus>) {
+        self.apps = apps;
     }
 
     /// Fresh config when the window opens; returns the actions to kick off.
@@ -195,6 +203,9 @@ impl Settings {
             ui.add_space(12.0);
             ui.separator();
             self.servers_ui(ui, &mut actions, dim);
+            ui.add_space(12.0);
+            ui.separator();
+            self.apps_ui(ui, &mut actions, dim);
             ui.add_space(12.0);
             ui.separator();
             ui.heading("Files");
@@ -439,6 +450,34 @@ impl Settings {
         if !self.models_status.is_empty() {
             ui.label(&self.models_status);
         }
+    }
+
+    fn apps_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<SettingsAction>, dim: Color32) {
+        ui.heading("Apps");
+        ui.label("Apps Fane can work in through MCP. Set up installs the app if it's missing, adds its MCP add-on and connects Fane; Fane then opens the app when it needs it.");
+        egui::Grid::new("apps").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+            for a in &self.apps {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&a.name).strong());
+                    ui.label(RichText::new(&a.what).color(dim).small());
+                });
+                let state = match (a.configured, a.running, a.installed) {
+                    (true, true, _) => "✓ connected",
+                    (true, false, _) => "set up (not connected)",
+                    (false, _, true) => "installed",
+                    (false, _, false) => "not installed",
+                };
+                ui.label(state);
+                if a.configured {
+                    if ui.button("Remove").on_hover_text("Fane stops using it; the app stays installed").clicked() {
+                        actions.push(SettingsAction::RemoveApp(a.id.clone()));
+                    }
+                } else if ui.button("Set up").clicked() {
+                    actions.push(SettingsAction::SetupApp(a.id.clone()));
+                }
+                ui.end_row();
+            }
+        });
     }
 
     fn servers_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<SettingsAction>, dim: Color32) {

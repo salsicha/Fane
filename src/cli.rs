@@ -83,6 +83,11 @@ enum Cmd {
         #[command(subcommand)]
         action: RemoteCmd,
     },
+    /// Apps Fane can set up and use through MCP (Blender, FreeCAD, a web browser)
+    Apps {
+        #[command(subcommand)]
+        action: Option<AppsCmd>,
+    },
     /// Let other computers on your network use this one's models (prints the token they need)
     Share { state: OnOff },
     /// Run Fane's model server in the background, also when Fane isn't open
@@ -190,6 +195,18 @@ enum OllamaCmd {
 }
 
 #[derive(Subcommand)]
+enum AppsCmd {
+    /// Install the app if needed, its MCP add-on and server, and connect Fane to it
+    Setup {
+        app: String,
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Stop using an app's MCP server (the app stays installed)
+    Remove { app: String },
+}
+
+#[derive(Subcommand)]
 enum RemoteCmd {
     /// List the remotes and what they have
     List,
@@ -266,6 +283,7 @@ pub fn main() -> i32 {
             Cmd::Models => cmd_models(),
             Cmd::Route { role, targets } => cmd_route(&role, targets),
             Cmd::Remote { action } => cmd_remote(action),
+            Cmd::Apps { action } => cmd_apps(action),
             Cmd::Share { state } => cmd_share(matches!(state, OnOff::On)),
             Cmd::Service { state } => cmd_service(matches!(state, OnOff::On)),
             Cmd::Toggle => cmd_simple("toggle", json!({})),
@@ -597,6 +615,72 @@ fn cmd_remote(action: RemoteCmd) -> anyhow::Result<i32> {
             }
             reload_running();
             println!("Removed {name}.");
+        }
+    }
+    Ok(0)
+}
+
+fn cmd_apps(action: Option<AppsCmd>) -> anyhow::Result<i32> {
+    use crate::connectors::apps;
+    let cfg = Config::load()?;
+    crate::runtime::install::set_home(cfg.runtime.home_dir());
+    match action {
+        None => {
+            for a in &apps::APPS {
+                let state = match (apps::find(a).is_some(), cfg.mcp.servers.contains_key(a.id)) {
+                    (_, true) => "set up",
+                    (true, false) => "installed, not connected",
+                    (false, false) => "not installed",
+                };
+                println!("{:<8} {:<12} {state:<26} {}", a.id, a.name, a.what);
+            }
+            println!("\nSet one up with e.g. `fane apps setup blender`.");
+        }
+        Some(AppsCmd::Setup { app, yes }) => {
+            let Some(spec) = apps::spec(&app) else {
+                eprintln!("No app {app:?}; see `fane apps`.");
+                return Ok(1);
+            };
+            let steps = match apps::plan(spec) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return Ok(1);
+                }
+            };
+            println!("To {}, Fane will:", spec.what);
+            for s in &steps {
+                println!("  • {s}");
+            }
+            if !yes && !confirm("Continue?")? {
+                println!("Nothing changed.");
+                return Ok(1);
+            }
+            // A running Fane connects to the server right away; otherwise just configure it.
+            if ipc::running() {
+                ipc::send("app_setup", json!({"app": app}));
+                println!("Setting {} up in Fane (watch its progress card).", spec.name);
+                return Ok(0);
+            }
+            let progress = |s: &str| {
+                use std::io::Write;
+                print!("\r\x1b[2K{s}");
+                let _ = std::io::stdout().flush();
+            };
+            match runtime().block_on(apps::setup(spec, false, &progress)) {
+                Ok(server) => {
+                    config::set_mcp_server(spec.id, Some(&server))?;
+                    println!("\n{} is set up; Fane uses it from its next start.", spec.name);
+                }
+                Err(e) => {
+                    eprintln!("\n{} isn't set up: {e}", spec.name);
+                    return Ok(1);
+                }
+            }
+        }
+        Some(AppsCmd::Remove { app }) => {
+            config::set_mcp_server(&app, None)?;
+            println!("Fane no longer uses {app} (restart Fane if it's running; the app stays installed).");
         }
     }
     Ok(0)
