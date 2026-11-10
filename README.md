@@ -28,8 +28,9 @@ or ignore it and it fades away. Press a hotkey any time to type your own request
   finding a document or the right tool takes milliseconds.
 - **Remembers how you like things done.** Tell it once ("from now on, sign my emails *Best,
   Alex*") and it follows that preference until you change it.
-- **Has its own email** (Linux). Give it a Gmail account through GNOME Online Accounts. You
-  can email it tasks from your own address, and it replies. Mail from anyone else is ignored.
+- **Has its own email.** Give it an account of its own (Gmail, Fastmail, iCloud, or any IMAP
+  provider, with an app password kept in the system keychain). You can email it tasks from your
+  own address, and it replies. Mail from anyone else is ignored.
 - **Delegates the hard stuff.** Coding and long multi-step tasks go to a command-line coding
   agent: Qwen Code or CodeGem on the local models, or Claude Code and Codex on your own
   subscription (Claude also plans and reviews the local agents' work).
@@ -143,7 +144,8 @@ in ~/code/api"* (which gets delegated to a [coding agent](#coding-agents)).
   network, found automatically.
 - **Files**: the folders Fane may use (see [Files](#files)).
 - **Your email**: your personal address. Only mail from it is read, acted on and answered.
-- **Fane's own Gmail account** (Linux): which Online Accounts mailbox Fane uses, or off.
+- **Fane's own email account**: sign in with an address and app password (or, on Linux,
+  pick an Online Accounts account), and learn your provider's sender check.
 
 Everything else lives in the config file (**Edit config file…**, see
 [Configuration](#configuration)).
@@ -343,33 +345,48 @@ image takes about 11 seconds with CUDA (about a minute with Vulkan).
 
 ## Fane's own email
 
-Fane can have its own Gmail address (Linux only). It uses the Google sign-in built into
-GNOME (Settings → Online Accounts), so Fane never sees or stores a password. It asks Online
-Accounts for a short-lived token for **one account that you choose**.
+Fane can have an email address of its own, on Linux, macOS and Windows. You email it tasks
+from your own address and it replies; mail from anyone else is ignored. It reads its mailbox
+itself over IMAP and sends over SMTP; it isn't a mail client for your own mail (it reads that
+through the Thunderbird connector or an MCP server).
 
-1. Settings → Online Accounts → Google: sign in to the agent's account and keep **Mail**
-   switched on.
-2. In Fane's **Settings…**, pick that account under *Fane's own Gmail account*
-   (or `fane mail use agent@gmail.com`). Your other Google accounts stay untouched. If you
-   don't choose one, email stays off; Fane never falls back to another account.
+1. Make an account just for Fane (for example a new Gmail address), not your personal one,
+   and an **app password** for it: Gmail at <https://myaccount.google.com/apppasswords>
+   (after turning on 2-Step Verification), Fastmail, iCloud and Yahoo in their security
+   settings.
+2. In Fane's **Settings → Email**, enter the address and the app password and click
+   **Sign in** (or `fane mail login agent@gmail.com`, which asks for the password). Fane checks
+   both servers, then keeps the password in the system keychain (macOS Keychain, Windows
+   Credential Manager, or the Secret Service on Linux), never in the config file. Gmail,
+   Fastmail, iCloud and Yahoo servers are filled in; for other providers, enter the IMAP and
+   SMTP servers.
 3. Enter **Your email** (or `fane mail owner you@gmail.com`).
+
+On Linux you can instead pick a Google account from GNOME's Online Accounts (no password at
+all: Fane asks GNOME for a short-lived token for that one account). Outlook.com and Hotmail
+don't allow app passwords for other mail programs, so Fane can't sign in to them yet.
+
+**Knowing it's really you.** A `From:` line is easy to forge, so Fane only acts on a message
+when your mail provider's own server stamped it (the topmost `Authentication-Results`
+header) with a DMARC pass for your address's domain. Fane knows which server that is for
+Gmail (`mx.google.com`) and Fastmail. For other providers it learns it once: email Fane from
+your address, then click **Learn** under Settings → Email (or `fane mail learn`). It only
+accepts a server that stamped your message within the last 15 minutes, confirmed DMARC for
+you, and also stamped the other recent messages in the inbox. Until then, no email is acted
+on. You can also set it yourself as `[agent_mail] auth_server`.
 
 How Fane handles mail:
 
 | Situation | What Fane does |
 | --- | --- |
-| Mail from your address that passes Google's DMARC check | Runs it as a request and replies in the same thread. It can't type on your desktop, delegate to coding agents, send other mail or see your screen (all configurable), and it sends at most 20 auto-replies an hour. |
+| Mail from your address that passes your provider's DMARC check | Runs it as a request and replies in the same thread. It can't type on your desktop, delegate to coding agents, send other mail or see your screen (all configurable), and it sends at most 20 auto-replies an hour. |
 | Mail from anyone else, or that fails the check | Ignored. It is never shown to the model, and Fane doesn't reply. |
 | No address set under **Your email** | Nothing is acted on. |
 | The agent wants to email someone other than you | Shows a **Send this email?** card with the full message. Nothing is sent unless you click Send, and an unanswered card cancels after 3 minutes. |
 | You ask it about its mail | Uses the `fane_inbox`, `fane_read_email`, `fane_send_email` and `fane_reply_email` tools (separate from `recent_emails`, which reads *your* Thunderbird). Only your own verified messages are visible to it. |
 
-Your address needs Gmail's own verdict: the topmost `Authentication-Results` header, which
-mx.google.com adds, has to show `dmarc=pass` for your domain. A forged `From:` line isn't
-enough. Other commands: `fane mail accounts`, `fane mail off` and `fane mail status`.
-
-On macOS and Windows there's no equivalent of Online Accounts that avoids storing a
-password, so Fane's own mailbox isn't available there yet. Everything else is.
+Other commands: `fane mail status`, `fane mail logout`, and on Linux `fane mail accounts` /
+`fane mail use` for Online Accounts.
 
 ## Recommended models
 
@@ -557,7 +574,7 @@ roots = ["~"]                    # folders the file tools may use
 default = "auto"                 # or qwen, codegem, claude, codex (see Coding agents)
 
 [agent_mail]
-account = "my-assistant@gmail.com"  # from Settings → Online Accounts; empty = email off
+account = "my-assistant@gmail.com"  # sign in with `fane mail login`; empty = email off
 owner_email = "me@gmail.com"        # only DMARC-verified mail from you is acted on
 remote_can_see_screen = false
 
@@ -626,9 +643,11 @@ pasting and the global hotkey.
   `/usr/share/doc/fane/examples/`) or the `input` group. That access also lets a process
   type anywhere.
 - Fane's mailbox is a way in from the internet, so it only takes instructions from your
-  own address, and only when Google's DMARC check passes. Emailed requests get a reduced set
-  of tools, and every message to anyone else needs your click. The Online Accounts token
-  covers the whole mailbox, so give Fane an account of its own, not your personal one.
+  own address, and only when your provider's DMARC check passes. Emailed requests get a
+  reduced set of tools, and every message to anyone else needs your click. The app password
+  (or Online Accounts token) opens the whole mailbox, so give Fane an account of its own, not
+  your personal one. The password lives in the system keychain, readable by programs running
+  as you once the keychain is unlocked.
 - Fane's model server only listens on `127.0.0.1` unless you turn on sharing. With sharing
   on, other computers need its token (sent as a bearer token, compared in constant time);
   without it they only learn that a Fane is there. Requests from this computer need no token,
@@ -672,7 +691,8 @@ Windows. These have been tested on Ubuntu: the agent loop against a local model,
 discovery, the UI windows, the IPC, the connectors (including a live MCP server), the mail
 logic, the eval harness, and installing the `.deb` from the apt repository. The macOS and
 Windows builds compile and pass the unit tests in CI but haven't been tried on a real
-desktop yet, and neither have the GNOME extension and live Gmail.
+desktop yet, and neither have the GNOME extension and a live mailbox (signing in with an app
+password is unit-tested, and the keychain storage was tested on Linux).
 
 The model server has been tested on a NUC with a Tesla V100 and an Intel Iris Xe: setup
 (llama.cpp CUDA and Vulkan builds, Ollama's models reused, stable-diffusion.cpp compiled
@@ -691,7 +711,7 @@ Ideas for next steps:
 
 - Read the focused text field through AT-SPI / accessibility APIs, which is more precise
   than the screenshot.
-- Fane's own mailbox on macOS and Windows.
+- Signing in to Outlook.com / Microsoft 365 mailboxes (Microsoft's own sign-in).
 - Built-in Evolution, GNOME Calendar and browser-tab connectors.
 - Streaming answers, and cancelling a running task.
 - Learn from which suggestions you accept and dismiss.

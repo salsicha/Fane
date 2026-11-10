@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use super::accounts::OnlineAccounts;
 use super::gmail::{
-    GmailClient, MailClient, MailError, MailMessage, TokenFn, build_message, strip_quoted, truncate_chars,
+    Auth, ImapClient, MailClient, MailError, MailMessage, TokenFn, build_message, strip_quoted, truncate_chars,
 };
 use super::trust::verified_owner;
 use crate::config::{AgentMailCfg, STATE_DIR};
@@ -97,31 +97,23 @@ impl AgentMailbox {
         })
     }
 
-    /// Connect to `address` in GNOME Online Accounts and start polling. Errors are user-facing.
+    /// Sign in to the configured account (an app password from the keychain, or GNOME Online
+    /// Accounts) and start polling. Errors are user-facing.
     pub async fn connect(
         accounts: Arc<OnlineAccounts>,
         cfg: AgentMailCfg,
         host: Arc<dyn MailHost>,
     ) -> anyhow::Result<Arc<AgentMailbox>> {
-        let address = cfg.account.trim().to_string();
-        if address.is_empty() {
-            anyhow::bail!("No email account is set for Fane");
-        }
-        let acc = accounts
-            .find(&address)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("{address} isn't in Settings → Online Accounts"))?;
-        let token: TokenFn = {
-            let (accounts, acc) = (accounts.clone(), acc.clone());
-            Arc::new(move || {
-                let (accounts, acc) = (accounts.clone(), acc.clone());
-                Box::pin(async move { accounts.access_token(&acc).await.map_err(|e| MailError::Auth(e.0)) })
-            })
-        };
-        let client = Arc::new(GmailClient::new(&acc.email, token, &acc.imap_host, &acc.smtp_host));
-        let state_path = STATE_DIR.join(format!("mail-{}.json", acc.email));
+        let client = Arc::new(client_for(&accounts, &cfg).await?);
+        let address = client.address().to_string();
+        let state_path = STATE_DIR.join(format!("mail-{address}.json"));
         if cfg.owner().is_none() {
             host.notify(NO_OWNER_NOTICE);
+        } else if cfg.auth_server().is_empty() {
+            host.notify(&format!(
+                "Fane doesn't know yet which server checks who sent mail to {address}, so it won't act on email. \
+                 Email Fane from your address, then use Settings → Email → Learn (or `fane mail learn`)."
+            ));
         }
         let mailbox = Self::new(client, cfg, host, state_path);
         mailbox.init_state().await?;
@@ -255,7 +247,7 @@ impl AgentMailbox {
             tracing::info!("ignoring mail {} from {:?}: no owner email set", msg.uid, msg.from_addr);
             return;
         };
-        let Some(sender) = verified_owner(&msg, Some(&owner)) else {
+        let Some(sender) = verified_owner(&msg, Some(&owner), &cfg.auth_server()) else {
             tracing::info!("ignoring mail {} from {:?}: not a verified message from the owner", msg.uid, msg.from_addr);
             return;
         };
@@ -300,7 +292,8 @@ impl AgentMailbox {
         let (Ok(uid), Some(owner)) = (u32::try_from(uid), self.cfg().owner()) else {
             return Ok(None);
         };
-        Ok(self.client.get(uid).await?.filter(|m| verified_owner(m, Some(&owner)).is_some()))
+        let server = self.cfg().auth_server();
+        Ok(self.client.get(uid).await?.filter(|m| verified_owner(m, Some(&owner), &server).is_some()))
     }
 
     async fn inbox_tool(&self, limit: i64, query: &str, unread_only: bool) -> Result<Value, MailError> {
@@ -311,8 +304,12 @@ impl AgentMailbox {
         let query = format!("from:{owner} {}", query.trim());
         let limit = usize::try_from(limit).unwrap_or(10).clamp(1, 50);
         let msgs = self.client.inbox(limit, query.trim(), unread_only).await?;
-        let items: Vec<Value> =
-            msgs.iter().filter(|m| verified_owner(m, Some(&owner)).is_some()).map(|m| m.summary(200)).collect();
+        let server = self.cfg().auth_server();
+        let items: Vec<Value> = msgs
+            .iter()
+            .filter(|m| verified_owner(m, Some(&owner), &server).is_some())
+            .map(|m| m.summary(200))
+            .collect();
         if items.is_empty() {
             return Ok(json!("No email from you in the inbox."));
         }
@@ -404,7 +401,7 @@ impl AgentMailbox {
                     &[],
                     &[
                         ("limit", prop("integer", "")),
-                        ("query", prop("string", "Gmail search, e.g. subject:notes")),
+                        ("query", prop("string", "Words to look for (on Gmail, Gmail search like subject:notes)")),
                         ("unread_only", prop("boolean", "")),
                     ],
                 ),
@@ -458,6 +455,87 @@ impl AgentMailbox {
             ),
         ]
     }
+}
+
+/// The mail client for `cfg`: a password from the keychain, else (Linux) Online Accounts.
+pub async fn client_for(accounts: &Arc<OnlineAccounts>, cfg: &AgentMailCfg) -> anyhow::Result<ImapClient> {
+    let address = cfg.account.trim().to_lowercase();
+    if address.is_empty() {
+        anyhow::bail!("No email account is set for Fane");
+    }
+    let preset = super::login::preset(&address);
+    let pick = |configured: &str, preset_value: Option<&'static str>| {
+        if configured.trim().is_empty() {
+            preset_value.unwrap_or("").to_string()
+        } else {
+            configured.trim().to_string()
+        }
+    };
+    let password = super::login::load_password(&address);
+    let use_password = match cfg.login.as_str() {
+        "password" => true,
+        "online-accounts" => false,
+        _ => password.is_some() || !cfg!(target_os = "linux"),
+    };
+    if use_password {
+        let password = password.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no app password saved for {address}; sign in under Settings → Email (or `fane mail login {address}`)"
+            )
+        })?;
+        let imap = pick(&cfg.imap_host, preset.map(|p| p.imap_host));
+        let smtp = pick(&cfg.smtp_host, preset.map(|p| p.smtp_host));
+        if imap.is_empty() || smtp.is_empty() {
+            anyhow::bail!("set the mail servers for {address} (imap_host and smtp_host under [agent_mail])");
+        }
+        let smtp_port =
+            if cfg.smtp_host.trim().is_empty() { preset.map_or(cfg.smtp_port, |p| p.smtp_port) } else { cfg.smtp_port };
+        return Ok(ImapClient::new(&address, Auth::Password(password), (&imap, cfg.imap_port), (&smtp, smtp_port)));
+    }
+    let acc = accounts.find(&address).await?.ok_or_else(|| {
+        anyhow::anyhow!("{address} isn't in Settings → Online Accounts; sign in with an app password instead")
+    })?;
+    let token: TokenFn = {
+        let (accounts, acc) = (accounts.clone(), acc.clone());
+        Arc::new(move || {
+            let (accounts, acc) = (accounts.clone(), acc.clone());
+            Box::pin(async move { accounts.access_token(&acc).await.map_err(|e| MailError::Auth(e.0)) })
+        })
+    };
+    Ok(ImapClient::new(&acc.email, Auth::OAuth(token), (&acc.imap_host, 993), (&acc.smtp_host, 587)))
+}
+
+/// Find the server that verifies incoming mail for this mailbox: the newest message from the
+/// owner, sent in the last 15 minutes, whose topmost Authentication-Results passes DMARC for
+/// the owner's domain, written by the same server that tops the other recent messages too.
+pub async fn learn_auth_server(client: &dyn MailClient, owner: &str) -> Result<String, String> {
+    let owner = owner.trim().to_lowercase();
+    let recent = client.inbox(10, "", false).await.map_err(|e| e.to_string())?;
+    let from_owner = recent
+        .iter()
+        .find(|m| m.from_addr == owner)
+        .ok_or_else(|| format!("no recent message from {owner}; email Fane from that address first"))?;
+    if let Some(age) = from_owner.age_minutes()
+        && age > 15
+    {
+        return Err(format!("the newest message from {owner} is {age} minutes old; send a new one and try again"));
+    }
+    let server = super::login::authserv_id(&from_owner.auth_results);
+    if server.is_empty() {
+        return Err(
+            "your message has no Authentication-Results header, so this provider can't prove who sent mail".into()
+        );
+    }
+    let others: Vec<&MailMessage> = recent.iter().filter(|m| m.uid != from_owner.uid).collect();
+    if others.iter().any(|m| super::login::authserv_id(&m.auth_results) != server) {
+        return Err(format!(
+            "the recent messages aren't all stamped by {server}; set [agent_mail] auth_server yourself if you're sure"
+        ));
+    }
+    if !super::trust::dmarc_pass(from_owner, &server) {
+        return Err(format!("{server} didn't confirm (DMARC) that your message came from {owner}"));
+    }
+    Ok(server)
 }
 
 pub fn mail_tool_names() -> [&'static str; 4] {
@@ -604,6 +682,41 @@ mod tests {
         assert_eq!(sent[0].references, "<abc@mail.gmail.com>");
         assert_eq!(*client.seen.lock().unwrap(), vec![5]);
         assert_eq!(*host.notes.lock().unwrap(), vec!["Replied to you: Q3?"]);
+    }
+
+    /// A message to Fane, stamped by `server`, sent just now.
+    fn stamped(uid: u32, from: &str, server: &str, dmarc: &str) -> MailMessage {
+        let domain = from.rsplit_once('@').unwrap().1;
+        let ar = format!("{server}; spf=pass; dmarc={dmarc} (p=none) header.from={domain}");
+        let mut m = parse_message(uid, &raw(from, "Test", "hi", &ar, ""), "");
+        m.date = chrono::Utc::now().to_rfc3339();
+        m
+    }
+
+    #[tokio::test]
+    async fn learns_the_verifier_only_from_a_fresh_consistent_owner_message() {
+        let server = "mx01.mail.icloud.com";
+        let ok =
+            FakeClient::with(vec![stamped(1, "news@shop.example", server, "pass"), stamped(2, USER, server, "pass")]);
+        assert_eq!(learn_auth_server(ok.as_ref(), USER).await.as_deref(), Ok(server));
+
+        let mut old = stamped(2, USER, server, "pass");
+        old.date = "2026-01-01T00:00:00+00:00".into();
+        let stale = FakeClient::with(vec![old]);
+        assert!(learn_auth_server(stale.as_ref(), USER).await.unwrap_err().contains("minutes old"));
+
+        // Someone else's message claims a different verifier: don't guess.
+        let mixed = FakeClient::with(vec![
+            stamped(1, "x@evil.example", "mx.evil.example", "pass"),
+            stamped(2, USER, server, "pass"),
+        ]);
+        assert!(learn_auth_server(mixed.as_ref(), USER).await.unwrap_err().contains("aren't all stamped"));
+
+        let failed = FakeClient::with(vec![stamped(2, USER, server, "fail")]);
+        assert!(learn_auth_server(failed.as_ref(), USER).await.unwrap_err().contains("didn't confirm"));
+
+        let none = FakeClient::with(vec![stamped(1, "a@b.example", server, "pass")]);
+        assert!(learn_auth_server(none.as_ref(), USER).await.unwrap_err().contains("no recent message"));
     }
 
     #[tokio::test]

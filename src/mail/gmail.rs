@@ -65,11 +65,17 @@ pub struct MailMessage {
     pub seen: bool,
     /// Space-separated message ids, each in angle brackets.
     pub references: String,
-    /// Topmost Authentication-Results header, i.e. the one Gmail's own servers added.
+    /// Topmost Authentication-Results header, i.e. the one the provider's servers added.
     pub auth_results: String,
 }
 
 impl MailMessage {
+    /// Minutes since the Date header (None if it can't be read).
+    pub fn age_minutes(&self) -> Option<i64> {
+        let sent = chrono::DateTime::parse_from_rfc3339(&self.date).ok()?;
+        Some((chrono::Utc::now() - sent.with_timezone(&chrono::Utc)).num_minutes())
+    }
+
     pub fn summary(&self, snippet: usize) -> Value {
         let collapsed = self.body.split_whitespace().collect::<Vec<_>>().join(" ");
         json!({"uid": self.uid, "from": self.from, "subject": self.subject, "date": self.date,
@@ -272,7 +278,7 @@ pub trait MailClient: Send + Sync {
     async fn state(&self) -> Result<(u32, u32), MailError>;
     /// Messages with UID > `last_uid` (at most 50, oldest first), plus the current UIDVALIDITY.
     async fn new_since(&self, last_uid: u32) -> Result<(u32, Vec<MailMessage>), MailError>;
-    /// Newest first. A non-empty `query` is a Gmail search (X-GM-RAW).
+    /// Newest first. A non-empty `query` is a Gmail search on Gmail, else words in the message.
     async fn inbox(&self, limit: usize, query: &str, unread_only: bool) -> Result<Vec<MailMessage>, MailError>;
     async fn get(&self, uid: u32) -> Result<Option<MailMessage>, MailError>;
     async fn mark_seen(&self, uid: u32) -> Result<(), MailError>;
@@ -350,33 +356,78 @@ fn tls_connector() -> Result<TlsConnector, MailError> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-/// Gmail over IMAP (993, TLS) and SMTP (587, STARTTLS), both with XOAUTH2.
-/// One IMAP connection per operation: simple, and immune to token expiry mid-session.
-pub struct GmailClient {
+/// How the client signs in.
+#[derive(Clone)]
+pub enum Auth {
+    /// SASL XOAUTH2 with a fresh token for each connection (GNOME Online Accounts).
+    OAuth(TokenFn),
+    /// The account address and an app password.
+    Password(String),
+}
+
+/// A mailbox over IMAP (TLS) and SMTP (STARTTLS on 587, or TLS on 465): Gmail through Online
+/// Accounts, or any provider with an app password. One IMAP connection per operation: simple,
+/// and immune to token expiry mid-session.
+pub struct ImapClient {
     address: String,
-    token: TokenFn,
+    auth: Auth,
     pub imap_host: String,
+    pub imap_port: u16,
     pub smtp_host: String,
+    pub smtp_port: u16,
     lock: Mutex<()>,
 }
 
-impl GmailClient {
-    pub fn new(address: &str, token: TokenFn, imap_host: &str, smtp_host: &str) -> Self {
+impl ImapClient {
+    pub fn new(address: &str, auth: Auth, imap: (&str, u16), smtp: (&str, u16)) -> Self {
         let or = |h: &str, d: &str| if h.trim().is_empty() { d.to_string() } else { h.trim().to_string() };
+        let port = |p: u16, d: u16| if p == 0 { d } else { p };
         Self {
             address: address.to_string(),
-            token,
-            imap_host: or(imap_host, "imap.gmail.com"),
-            smtp_host: or(smtp_host, "smtp.gmail.com"),
+            auth,
+            imap_host: or(imap.0, "imap.gmail.com"),
+            imap_port: port(imap.1, 993),
+            smtp_host: or(smtp.0, "smtp.gmail.com"),
+            smtp_port: port(smtp.1, 587),
             lock: Mutex::new(()),
         }
     }
 
+    /// Gmail understands its own search syntax (X-GM-RAW); other servers get IMAP TEXT.
+    fn gmail(&self) -> bool {
+        self.imap_host.ends_with("gmail.com") || self.imap_host.ends_with("googlemail.com")
+    }
+
+    /// Check that it can sign in to both servers.
+    pub async fn check(&self) -> Result<(), MailError> {
+        self.state().await?;
+        self.smtp().await?.test_connection().await.map_err(|e| MailError::Smtp(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn smtp(&self) -> Result<AsyncSmtpTransport<Tokio1Executor>, MailError> {
+        let (secret, mechanisms) = match &self.auth {
+            Auth::OAuth(token) => (token().await?, vec![Mechanism::Xoauth2]),
+            Auth::Password(p) => (p.clone(), vec![Mechanism::Plain, Mechanism::Login]),
+        };
+        let builder = if self.smtp_port == 465 {
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&self.smtp_host)
+        } else {
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.smtp_host)
+        }
+        .map_err(|e| MailError::Smtp(e.to_string()))?;
+        Ok(builder
+            .port(self.smtp_port)
+            .credentials(Credentials::new(self.address.clone(), secret))
+            .authentication(mechanisms)
+            .timeout(Some(NET_TIMEOUT))
+            .build())
+    }
+
     /// Connect, authenticate and open INBOX (read-only unless `writable`). Returns UIDVALIDITY.
     async fn open(&self, writable: bool) -> Result<(ImapSession, u32), MailError> {
-        let token = (self.token)().await?;
         let host = self.imap_host.as_str();
-        let tcp = tokio::time::timeout(NET_TIMEOUT, TcpStream::connect((host, 993)))
+        let tcp = tokio::time::timeout(NET_TIMEOUT, TcpStream::connect((host, self.imap_port)))
             .await
             .map_err(|_| MailError::Imap(format!("timed out connecting to {host}")))?
             .map_err(imap_err)?;
@@ -388,8 +439,17 @@ impl GmailClient {
             .await
             .map_err(imap_err)?
             .ok_or_else(|| MailError::Imap("connection closed before greeting".into()))?;
-        let auth = XOAuth2 { response: xoauth2(&self.address, &token), sent: false };
-        let mut session = client.authenticate("XOAUTH2", auth).await.map_err(|(e, _)| imap_err(e))?;
+        let mut session = match &self.auth {
+            Auth::OAuth(token) => {
+                let token = token().await?;
+                let auth = XOAuth2 { response: xoauth2(&self.address, &token), sent: false };
+                client.authenticate("XOAUTH2", auth).await.map_err(|(e, _)| imap_err(e))?
+            }
+            Auth::Password(p) => client
+                .login(&self.address, p)
+                .await
+                .map_err(|(e, _)| MailError::Auth(format!("{host} didn't accept the address and app password: {e}")))?,
+        };
         let mailbox = if writable { session.select("INBOX").await } else { session.examine("INBOX").await }
             .map_err(|e| MailError::Imap(format!("cannot open INBOX: {e}")))?;
         Ok((session, mailbox.uid_validity.unwrap_or(0)))
@@ -434,7 +494,7 @@ impl GmailClient {
 }
 
 #[async_trait]
-impl MailClient for GmailClient {
+impl MailClient for ImapClient {
     fn address(&self) -> &str {
         &self.address
     }
@@ -470,8 +530,18 @@ impl MailClient for GmailClient {
     async fn inbox(&self, limit: usize, query: &str, unread_only: bool) -> Result<Vec<MailMessage>, MailError> {
         let mut criteria = if unread_only { "UNSEEN".to_string() } else { "ALL".to_string() };
         let query: String = query.chars().filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n')).collect();
-        if !query.trim().is_empty() {
-            criteria = format!("{criteria} X-GM-RAW \"{}\"", query.trim());
+        let mut query = query.trim().to_string();
+        if !self.gmail() {
+            // Gmail's "from:x" becomes IMAP FROM; the rest is searched as text.
+            if let Some(rest) = query.strip_prefix("from:") {
+                let (from, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+                criteria = format!("{criteria} FROM \"{from}\"");
+                query = rest.trim().to_string();
+            }
+        }
+        if !query.is_empty() {
+            let kind = if self.gmail() { "X-GM-RAW" } else { "TEXT" };
+            criteria = format!("{criteria} {kind} \"{query}\"");
         }
         let limit = limit.clamp(1, MAX_FETCH);
         self.with_session(false, |s, _| {
@@ -511,14 +581,7 @@ impl MailClient for GmailClient {
 
     async fn send(&self, message: lettre::Message) -> Result<String, MailError> {
         let id = message.headers().get_raw("Message-ID").unwrap_or("").to_string();
-        let token = (self.token)().await?;
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.smtp_host)
-            .map_err(|e| MailError::Smtp(e.to_string()))?
-            .port(587)
-            .credentials(Credentials::new(self.address.clone(), token))
-            .authentication(vec![Mechanism::Xoauth2])
-            .timeout(Some(NET_TIMEOUT))
-            .build();
+        let transport = self.smtp().await?;
         let _guard = self.lock.lock().await;
         transport.send(message).await.map_err(|e| MailError::Smtp(e.to_string()))?;
         Ok(id)

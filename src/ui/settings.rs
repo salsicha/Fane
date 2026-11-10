@@ -24,6 +24,9 @@ pub enum SettingsAction {
     SetService(bool),
     SetupApp(String),
     RemoveApp(String),
+    MailLogin(crate::mail::login::Login),
+    MailLogout,
+    MailLearn,
     Copy(String),
     RefreshAccounts,
     SelectAccount(String),
@@ -51,6 +54,13 @@ pub struct Settings {
     accounts: Option<Result<Vec<GoaAccount>, String>>,
     owner: String,
     mail_status: String,
+    /// The app-password sign-in form.
+    mail_addr: String,
+    mail_pw: String,
+    mail_imap: String,
+    mail_smtp: String,
+    mail_port: String,
+    mail_busy: bool,
     roots: String,
     roots_status: String,
     prefs: Vec<crate::prefs::Pref>,
@@ -93,6 +103,12 @@ impl Settings {
             server_status: String::new(),
             accounts: None,
             mail_status: String::new(),
+            mail_addr: String::new(),
+            mail_pw: String::new(),
+            mail_imap: String::new(),
+            mail_smtp: String::new(),
+            mail_port: String::new(),
+            mail_busy: false,
             roots_status: String::new(),
             prefs: vec![],
             index_status: String::new(),
@@ -188,6 +204,10 @@ impl Settings {
 
     pub fn mail_saved(&mut self, result: Result<String, String>, cfg: Config) {
         self.cfg = cfg;
+        self.mail_busy = false;
+        if result.is_ok() {
+            self.mail_pw.clear();
+        }
         self.mail_status = match result {
             Ok(m) => format!("✓ {m}."),
             Err(e) => format!("✗ {e}"),
@@ -587,17 +607,97 @@ impl Settings {
             .small(),
         );
         ui.add_space(6.0);
-        ui.label("Fane's own Gmail account");
-        if !cfg!(target_os = "linux") {
-            ui.label(
-                RichText::new("Fane's own mailbox uses GNOME Online Accounts, so it's only available on Linux.")
-                    .color(dim),
-            );
-        } else {
-            let current = self.cfg.agent_mail.account.trim().to_lowercase();
+        ui.label("Fane's own email account");
+        let current = self.cfg.agent_mail.account.trim().to_lowercase();
+        if !current.is_empty() {
             ui.horizontal(|ui| {
-                let label = if current.is_empty() { "Off (no email access)".to_string() } else { current.clone() };
-                egui::ComboBox::from_id_salt("mail-account").selected_text(label).width(320.0).show_ui(ui, |ui| {
+                ui.label(RichText::new(&current).strong());
+                if ui.button("Sign out").clicked() {
+                    actions.push(SettingsAction::MailLogout);
+                }
+            });
+            if self.cfg.agent_mail.auth_server().is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Fane won't act on email until it knows which server checks senders. Email Fane from your address, then:")
+                            .color(dim)
+                            .small(),
+                    );
+                    if ui.small_button("Learn").clicked() {
+                        actions.push(SettingsAction::MailLearn);
+                    }
+                });
+            }
+        }
+        ui.label(
+            RichText::new("Give Fane an account of its own (not your personal one) and an app password for it.")
+                .color(dim)
+                .small(),
+        );
+        egui::Grid::new("mail-login").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label("Address");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.mail_addr)
+                    .hint_text("my-assistant@gmail.com")
+                    .desired_width(280.0),
+            );
+            ui.end_row();
+            ui.label("App password");
+            ui.add(egui::TextEdit::singleline(&mut self.mail_pw).password(true).desired_width(280.0));
+            ui.end_row();
+        });
+        let preset = crate::mail::login::preset(&self.mail_addr);
+        match (preset, crate::mail::login::unsupported(&self.mail_addr)) {
+            (_, Some(why)) => {
+                ui.label(RichText::new(why).color(dim).small());
+            }
+            (Some(p), None) => {
+                ui.label(
+                    RichText::new(format!("{}: make an app password at {}", p.provider, p.app_password_help))
+                        .color(dim)
+                        .small(),
+                );
+            }
+            (None, None) => {
+                if self.mail_addr.contains('@') {
+                    egui::Grid::new("mail-servers").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                        ui.label("IMAP server");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.mail_imap)
+                                .hint_text("imap.example.com")
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                        ui.label("SMTP server");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.mail_smtp)
+                                .hint_text("smtp.example.com")
+                                .desired_width(200.0),
+                        );
+                        ui.end_row();
+                        ui.label("SMTP port");
+                        ui.add(egui::TextEdit::singleline(&mut self.mail_port).hint_text("587").desired_width(60.0));
+                        ui.end_row();
+                    });
+                }
+            }
+        }
+        let ready = !self.mail_busy && self.mail_addr.contains('@') && !self.mail_pw.trim().is_empty();
+        if ui.add_enabled(ready, egui::Button::new(if self.mail_busy { "Checking…" } else { "Sign in" })).clicked() {
+            self.mail_busy = true;
+            self.mail_status.clear();
+            actions.push(SettingsAction::MailLogin(crate::mail::login::Login {
+                address: self.mail_addr.trim().to_string(),
+                password: self.mail_pw.clone(),
+                imap_host: self.mail_imap.trim().to_string(),
+                smtp_host: self.mail_smtp.trim().to_string(),
+                smtp_port: self.mail_port.trim().parse().unwrap_or(0),
+            }));
+        }
+        if cfg!(target_os = "linux") {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Or, without a password, an account from Online Accounts:").color(dim).small());
+                egui::ComboBox::from_id_salt("mail-account").selected_text("Choose…").width(240.0).show_ui(ui, |ui| {
                     match &self.accounts {
                         None => {
                             ui.label("Loading…");
@@ -623,24 +723,11 @@ impl Settings {
                             }
                         }
                     }
-                    if ui.selectable_label(current.is_empty(), "Off (no email access)").clicked() {
-                        actions.push(SettingsAction::SelectAccount(String::new()));
-                    }
                 });
-                if ui.button("Refresh").clicked() {
-                    actions.push(SettingsAction::RefreshAccounts);
-                }
-                if ui.button("Add or manage accounts…").clicked() {
+                if ui.small_button("Manage…").clicked() {
                     actions.push(SettingsAction::ManageAccounts);
                 }
             });
-            ui.label(
-                RichText::new(
-                    "Give Fane an account of its own (Settings → Online Accounts → Google), not your personal one.",
-                )
-                .color(dim)
-                .small(),
-            );
         }
         if !self.mail_status.is_empty() {
             ui.label(&self.mail_status);

@@ -1195,7 +1195,12 @@ impl Core {
 
     pub async fn select_mail_account(&self, address: &str) -> Result<String, String> {
         set_value("agent_mail", "account", address.trim()).map_err(|e| e.to_string())?;
-        self.cfg.write().unwrap().agent_mail.account = address.trim().to_string();
+        set_value("agent_mail", "login", "online-accounts").map_err(|e| e.to_string())?;
+        {
+            let mut cfg = self.cfg.write().unwrap();
+            cfg.agent_mail.account = address.trim().to_string();
+            cfg.agent_mail.login = "online-accounts".into();
+        }
         self.setup_mail().await;
         Ok(if address.trim().is_empty() {
             "Fane's email is off".into()
@@ -1219,6 +1224,54 @@ impl Core {
         } else {
             format!("Fane will only read and answer mail from {email}")
         })
+    }
+
+    /// Sign Fane in to its own mailbox with an app password (checked, then kept in the
+    /// keychain) and start using it.
+    pub async fn mail_login(&self, login: crate::mail::login::Login) -> Result<String, String> {
+        let note = crate::mail::login::sign_in(&login).await?;
+        let address = login.address.trim().to_lowercase();
+        for (key, value) in [
+            ("account", address.as_str()),
+            ("login", "password"),
+            ("imap_host", login.imap_host.trim()),
+            ("smtp_host", login.smtp_host.trim()),
+        ] {
+            set_value("agent_mail", key, value).map_err(|e| e.to_string())?;
+        }
+        if login.smtp_port != 0 {
+            set_value("agent_mail", "smtp_port", login.smtp_port as i64).map_err(|e| e.to_string())?;
+        }
+        if let Ok(fresh) = Config::load() {
+            self.cfg.write().unwrap().agent_mail = fresh.agent_mail;
+        }
+        self.setup_mail().await;
+        match self.mail_error.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => Ok(note),
+        }
+    }
+
+    /// Forget the app password and turn Fane's email off.
+    pub async fn mail_logout(&self) -> Result<String, String> {
+        let address = self.cfg().agent_mail.account.clone();
+        crate::mail::login::delete_password(&address);
+        set_value("agent_mail", "account", "").map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().agent_mail.account.clear();
+        self.setup_mail().await;
+        Ok(format!("Signed out of {address}; Fane's email is off"))
+    }
+
+    /// Learn which server verifies mail for Fane's mailbox, from a message the owner just sent.
+    pub async fn mail_learn(&self) -> Result<String, String> {
+        let cfg = self.cfg().agent_mail;
+        let owner = cfg.owner().ok_or("set your own email address first")?;
+        let client = crate::mail::mailbox::client_for(&self.accounts, &cfg).await.map_err(|e| e.to_string())?;
+        let server = crate::mail::mailbox::learn_auth_server(&client, &owner).await?;
+        set_value("agent_mail", "auth_server", server.as_str()).map_err(|e| e.to_string())?;
+        self.cfg.write().unwrap().agent_mail.auth_server = server.clone();
+        self.setup_mail().await;
+        Ok(format!("Fane now trusts {server}'s check of who sent each message; email from you will be answered"))
     }
 
     /// Re-read [agent_mail] from disk (after `fane mail ...`) and reconnect.

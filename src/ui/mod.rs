@@ -460,6 +460,24 @@ impl App {
                 });
             }
             SettingsAction::Install(want) => self.core.run_setup(want),
+            SettingsAction::MailLogin(login) => {
+                self.rt.spawn(async move {
+                    let r = core.mail_login(login).await;
+                    let _ = proxy.send_event(UiEvent::MailSaved(r));
+                });
+            }
+            SettingsAction::MailLogout => {
+                self.rt.spawn(async move {
+                    let r = core.mail_logout().await;
+                    let _ = proxy.send_event(UiEvent::MailSaved(r));
+                });
+            }
+            SettingsAction::MailLearn => {
+                self.rt.spawn(async move {
+                    let r = core.mail_learn().await;
+                    let _ = proxy.send_event(UiEvent::MailSaved(r));
+                });
+            }
             SettingsAction::SetupApp(id) => {
                 self.rt.spawn(async move {
                     let r = core.setup_app(&id, false).await;

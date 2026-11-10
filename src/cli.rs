@@ -121,7 +121,7 @@ enum Cmd {
     InstallExtension,
     /// Start Fane when you log in
     Autostart { state: OnOff },
-    /// Fane's own email account (GNOME Online Accounts, Linux)
+    /// Fane's own email account (an app password on any system, or GNOME Online Accounts)
     Mail {
         #[command(subcommand)]
         action: MailCmd,
@@ -165,9 +165,26 @@ enum OnOff {
 
 #[derive(Subcommand)]
 enum MailCmd {
-    /// List the Google accounts in Online Accounts
+    /// Sign Fane in to its own account with an app password (asked for, kept in the keychain)
+    Login {
+        address: String,
+        /// IMAP server (default: the provider's)
+        #[arg(long, default_value = "")]
+        imap: String,
+        /// SMTP server (default: the provider's)
+        #[arg(long, default_value = "")]
+        smtp: String,
+        /// SMTP port: 587 (STARTTLS) or 465 (TLS)
+        #[arg(long, default_value_t = 0)]
+        smtp_port: u16,
+    },
+    /// Forget the app password and turn Fane's email off
+    Logout,
+    /// Learn which server proves who sent mail, from a message you just sent Fane
+    Learn,
+    /// List the Google accounts in Online Accounts (Linux)
     Accounts,
-    /// Use this account as Fane's mailbox
+    /// Use this Online Accounts account as Fane's mailbox (Linux)
     Use { address: String },
     /// Turn Fane's email off
     Off,
@@ -781,6 +798,75 @@ fn cmd_mail(action: MailCmd) -> anyhow::Result<i32> {
     let current = cfg.agent_mail.account.clone();
     let rt = runtime();
     match action {
+        MailCmd::Login { address, imap, smtp, smtp_port } => {
+            if let Some(p) = crate::mail::login::preset(&address) {
+                println!("{}: make an app password at {}", p.provider, p.app_password_help);
+            }
+            let password = rpassword::prompt_password(format!("App password for {address}: "))?;
+            let login = crate::mail::login::Login {
+                address: address.clone(),
+                password,
+                imap_host: imap.clone(),
+                smtp_host: smtp.clone(),
+                smtp_port,
+            };
+            println!("Checking…");
+            match rt.block_on(crate::mail::login::sign_in(&login)) {
+                Ok(note) => {
+                    let address = address.trim().to_lowercase();
+                    config::set_value("agent_mail", "account", address.as_str())?;
+                    config::set_value("agent_mail", "login", "password")?;
+                    config::set_value("agent_mail", "imap_host", imap.trim())?;
+                    config::set_value("agent_mail", "smtp_host", smtp.trim())?;
+                    if smtp_port != 0 {
+                        config::set_value("agent_mail", "smtp_port", smtp_port as i64)?;
+                    }
+                    ipc::send("mail_reload", json!({}));
+                    println!("{note}.");
+                    if cfg.agent_mail.owner().is_none() {
+                        println!("Set your own address too: fane mail owner you@example.com");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return Ok(1);
+                }
+            }
+        }
+        MailCmd::Logout => {
+            crate::mail::login::delete_password(&current);
+            config::set_value("agent_mail", "account", "")?;
+            ipc::send("mail_reload", json!({}));
+            println!(
+                "Signed out{}; Fane's email is off.",
+                if current.is_empty() { String::new() } else { format!(" of {current}") }
+            );
+        }
+        MailCmd::Learn => {
+            let Some(owner) = cfg.agent_mail.owner() else {
+                eprintln!("Set your own address first: fane mail owner you@example.com");
+                return Ok(1);
+            };
+            let accounts = std::sync::Arc::new(OnlineAccounts::new());
+            let learned = rt.block_on(async {
+                let client =
+                    crate::mail::mailbox::client_for(&accounts, &cfg.agent_mail).await.map_err(|e| e.to_string())?;
+                crate::mail::mailbox::learn_auth_server(&client, &owner).await
+            });
+            match learned {
+                Ok(server) => {
+                    config::set_value("agent_mail", "auth_server", server.as_str())?;
+                    ipc::send("mail_reload", json!({}));
+                    println!(
+                        "Fane now trusts {server}'s check of who sent each message; email from {owner} will be answered."
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return Ok(1);
+                }
+            }
+        }
         MailCmd::Accounts => {
             let accs = rt.block_on(OnlineAccounts::new().google_accounts())?;
             if accs.is_empty() {
@@ -834,6 +920,24 @@ fn cmd_mail(action: MailCmd) -> anyhow::Result<i32> {
         }
         MailCmd::Status => {
             println!("account:  {}", if current.is_empty() { "(off)" } else { &current });
+            if !current.is_empty() {
+                let password = crate::mail::login::load_password(&current).is_some();
+                let how = match cfg.agent_mail.login.as_str() {
+                    "online-accounts" => "Online Accounts",
+                    _ if password => "app password (in the system keychain)",
+                    _ => "Online Accounts",
+                };
+                println!("sign-in:  {how}");
+                let server = cfg.agent_mail.auth_server();
+                println!(
+                    "verifier: {}",
+                    if server.is_empty() {
+                        "unknown — email Fane from your address, then `fane mail learn`".into()
+                    } else {
+                        server
+                    }
+                );
+            }
             println!(
                 "you:      {}",
                 cfg.agent_mail.owner().unwrap_or_else(|| "(not set — no mail is acted on)".into())

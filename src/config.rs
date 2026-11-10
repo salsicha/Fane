@@ -442,12 +442,27 @@ impl Default for FilesCfg {
     }
 }
 
-/// Fane's own email: a Google account from GNOME Settings → Online Accounts (Linux only).
+/// Fane's own email account: any provider with an app password (kept in the system keychain),
+/// or on Linux a Google account from GNOME Settings → Online Accounts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentMailCfg {
     /// The one account Fane may use. Empty = email off. Fane never falls back to another.
     pub account: String,
+    /// "password" (an app password in the system keychain) or "online-accounts" (GNOME, Linux).
+    /// Empty: a saved password if there is one, else Online Accounts.
+    pub login: String,
+    /// Mail servers; empty = the provider's usual ones (Gmail, Fastmail, iCloud, Yahoo).
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub smtp_host: String,
+    /// 587 (STARTTLS) or 465 (TLS).
+    pub smtp_port: u16,
+    /// The server whose verdict (the Authentication-Results header it adds on delivery) proves
+    /// who sent a message, exactly or as "*.domain". Empty: known for Gmail and Fastmail; for
+    /// others, Fane learns it from a message you send it (`fane mail learn`). Until then, no
+    /// mail is acted on.
+    pub auth_server: String,
     pub poll_seconds: u64,
     /// Your personal email address. Only mail from it that passes Google's DMARC check is
     /// read, acted on and answered; everything else is ignored and never shown to the model.
@@ -464,6 +479,14 @@ pub struct AgentMailCfg {
 }
 
 impl AgentMailCfg {
+    /// The verifier to trust: configured, or the provider's known one ("" = none known).
+    pub fn auth_server(&self) -> String {
+        if !self.auth_server.trim().is_empty() {
+            return self.auth_server.trim().to_lowercase();
+        }
+        crate::mail::login::preset(&self.account).map(|p| p.auth_server.to_string()).unwrap_or_default()
+    }
+
     /// The one address whose mail Fane acts on (lowercased), if set.
     pub fn owner(&self) -> Option<String> {
         let o = self.owner_email.trim();
@@ -476,6 +499,12 @@ impl Default for AgentMailCfg {
     fn default() -> Self {
         Self {
             account: String::new(),
+            login: String::new(),
+            imap_host: String::new(),
+            imap_port: 993,
+            smtp_host: String::new(),
+            smtp_port: 587,
+            auth_server: String::new(),
             poll_seconds: 60,
             owner_email: String::new(),
             trusted_senders: vec![],
@@ -786,7 +815,7 @@ default = "auto"
 advisor = "auto"
 
 [agent_mail]
-# account = "my-assistant@gmail.com"   # must be in GNOME Settings → Online Accounts
+# account = "my-assistant@gmail.com"   # sign in with `fane mail login` (or Settings → Email)
 # owner_email = "me@example.com"       # only mail from you is read, acted on and answered
 
 # Expose MCP server tools to the assistant:
