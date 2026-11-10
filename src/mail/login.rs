@@ -144,21 +144,34 @@ fn entry(address: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, &address.trim().to_lowercase()).map_err(|e| format!("system keychain: {e}"))
 }
 
+/// Run a keychain call on its own thread: the Linux backend blocks on its own async runtime,
+/// which can't happen on one of Fane's runtime threads.
+fn off_runtime<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::spawn(f).join().expect("keychain thread")
+}
+
 pub fn save_password(address: &str, password: &str) -> Result<(), String> {
-    entry(address)?
-        .set_password(password)
-        .map_err(|e| format!("couldn't save the password in the system keychain: {e}"))
+    let (address, password) = (address.to_string(), password.to_string());
+    off_runtime(move || {
+        entry(&address)?
+            .set_password(&password)
+            .map_err(|e| format!("couldn't save the password in the system keychain: {e}"))
+    })
 }
 
 /// The saved password, if any (None also when the keychain isn't available).
 pub fn load_password(address: &str) -> Option<String> {
-    entry(address).ok()?.get_password().ok()
+    let address = address.to_string();
+    off_runtime(move || entry(&address).ok()?.get_password().ok())
 }
 
 pub fn delete_password(address: &str) {
-    if let Ok(e) = entry(address) {
-        let _ = e.delete_credential();
-    }
+    let address = address.to_string();
+    off_runtime(move || {
+        if let Ok(e) = entry(&address) {
+            let _ = e.delete_credential();
+        }
+    })
 }
 
 /// Whether an Authentication-Results server name matches a configured pattern: exactly, or
@@ -202,6 +215,16 @@ mod tests {
         assert_eq!(load_password(&addr).as_deref(), Some("abcd efgh"));
         delete_password(&addr);
         assert_eq!(load_password(&addr), None);
+    }
+
+    /// Same, from inside the async runtime (where Fane calls it).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn keychain_inside_tokio() {
+        let addr = format!("fane-test-async-{}@example.invalid", std::process::id());
+        save_password(&addr, "pw").unwrap();
+        assert_eq!(load_password(&addr).as_deref(), Some("pw"));
+        delete_password(&addr);
     }
 
     #[test]
